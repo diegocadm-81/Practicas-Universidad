@@ -541,8 +541,30 @@ def valoracion_estadistica(precios_ticker: pd.Series, precios_bmk: pd.Series,
 # FUNCIÓN: Señal técnica
 # ─────────────────────────────────────────────────────────────────────────────
 def senal_tecnica(ind: pd.DataFrame) -> dict:
-    ult = ind.iloc[-1]
+    """
+    Evalúa los indicadores técnicos y asigna un score entre -1 (bajista) y +1 (alcista).
 
+    Corrección Fibonacci:
+    ─────────────────────
+    La señal Fibonacci NO puede ser simplemente "precio < fibo 50%".
+    Esa regla ignora la tendencia y produce señales invertidas (como el caso
+    EEM: tendencia alcista, precio en máximos → bajista incorrecto).
+
+    Lógica correcta:
+      1. Detectar tendencia con pendiente lineal sobre todo el período.
+      2. ALCISTA: medir qué tan poco ha retrocedido el precio desde el máximo.
+         → Retroceso pequeño (precio cerca del máx) = señal alcista fuerte.
+         → Retroceso profundo (precio lejos del máx) = señal bajista.
+         Umbral: si retrocedió < 38.2% del rango → alcista (+1); > 61.8% → bajista (-1)
+      3. BAJISTA: medir qué tan poco ha rebotado el precio desde el mínimo.
+         → Rebote pequeño (precio cerca del mín) = señal bajista fuerte.
+         → Rebote profundo (precio lejos del mín) = señal alcista.
+         Umbral: si rebotó > 61.8% del rango → alcista (+1); < 38.2% → bajista (-1)
+    """
+    ult   = ind.iloc[-1]
+    p_act = float(ult["Precio"])
+
+    # ── Medias Móviles (Golden/Death Cross MA20 vs MA200) ─────────────────────
     ma20  = ult["MA20"]
     ma200 = ult["MA200"]
     if pd.isna(ma200):
@@ -550,17 +572,71 @@ def senal_tecnica(ind: pd.DataFrame) -> dict:
     else:
         s_ma = 1.0 if ma20 > ma200 else -1.0
 
-    rsi = ult["RSI"]
+    # ── RSI ───────────────────────────────────────────────────────────────────
+    rsi = float(ult["RSI"])
     s_rsi = -1.0 if rsi > 70 else (1.0 if rsi < 30 else 0.0)
 
+    # ── MACD ──────────────────────────────────────────────────────────────────
     s_macd = 1.0 if ult["MACD"] > ult["Signal"] else -1.0
 
-    p_min = float(ind["Precio"].min())
-    p_max = float(ind["Precio"].max())
-    fibo  = niveles_fibonacci(p_min, p_max)
-    s_fib = 1.0 if ult["Precio"] < fibo["Fibo 50%"] else -1.0
+    # ── Fibonacci con detección de tendencia ──────────────────────────────────
+    p_min   = float(ind["Precio"].min())
+    p_max   = float(ind["Precio"].max())
+    rango   = p_max - p_min
 
+    # Detectar tendencia mediante regresión lineal sobre los precios
+    x_reg      = np.arange(len(ind))
+    pendiente  = float(np.polyfit(x_reg, ind["Precio"].values, 1)[0])
+    es_alcista = pendiente >= 0
+
+    fibo = niveles_fibonacci(p_min, p_max)
+
+    if rango > 0:
+        if es_alcista:
+            # ── Tendencia ALCISTA ──────────────────────────────────────────
+            # El swing completo fue de mín → máx.
+            # El retroceso se mide desde el máximo hacia abajo.
+            # retroceso_ratio = 0   → precio exactamente en el máximo (muy alcista)
+            # retroceso_ratio = 1   → precio exactamente en el mínimo (muy bajista)
+            retroceso_ratio = (p_max - p_act) / rango   # entre 0 y 1
+            if retroceso_ratio <= 0.382:
+                # Retrocedió poco (< 38.2%): tendencia alcista intacta → señal ALCISTA
+                s_fib = 1.0
+            elif retroceso_ratio >= 0.618:
+                # Retrocedió profundamente (> 61.8%): tendencia en riesgo → señal BAJISTA
+                s_fib = -1.0
+            else:
+                # Zona intermedia (38.2% – 61.8%): señal NEUTRAL o leve
+                s_fib = round(0.5 - retroceso_ratio, 1)   # aprox 0 en zona media
+        else:
+            # ── Tendencia BAJISTA ──────────────────────────────────────────
+            # El swing completo fue de máx → mín.
+            # El rebote se mide desde el mínimo hacia arriba.
+            # rebote_ratio = 0   → precio exactamente en el mínimo (muy bajista)
+            # rebote_ratio = 1   → precio exactamente en el máximo (fuerte rebote)
+            rebote_ratio = (p_act - p_min) / rango   # entre 0 y 1
+            if rebote_ratio >= 0.618:
+                # Rebotó fuerte (> 61.8%): posible cambio de tendencia → señal ALCISTA
+                s_fib = 1.0
+            elif rebote_ratio <= 0.382:
+                # Rebote débil (< 38.2%): sigue bajista → señal BAJISTA
+                s_fib = -1.0
+            else:
+                # Zona intermedia
+                s_fib = round(rebote_ratio - 0.5, 1)
+    else:
+        s_fib = 0.0   # Sin rango suficiente → neutral
+
+    # Score ponderado: Fibonacci tiene el mayor peso (50%) por su relevancia técnica
     score = (1/6)*s_ma + (1/6)*s_rsi + (1/6)*s_macd + (1/2)*s_fib
+
+    # Etiqueta descriptiva de la señal Fibonacci para la tabla
+    fib_desc = (
+        f"{'Alcista' if es_alcista else 'Bajista'} | "
+        f"{'retroceso' if es_alcista else 'rebote'}: "
+        f"{(retroceso_ratio if es_alcista else rebote_ratio)*100:.1f}% del rango"
+        if rango > 0 else "Sin rango"
+    )
 
     return {
         "señales": {
@@ -569,10 +645,14 @@ def senal_tecnica(ind: pd.DataFrame) -> dict:
             "MACD":           s_macd,
             "Fibonacci":      s_fib,
         },
-        "score_tecnico": score,
-        "rsi_valor":     rsi,
-        "fibo_niveles":  fibo,
-        "precio_actual": float(ult["Precio"]),
+        "score_tecnico":  score,
+        "rsi_valor":      rsi,
+        "fibo_niveles":   fibo,
+        "precio_actual":  p_act,
+        "fib_tendencia":  "Alcista" if es_alcista else "Bajista",
+        "fib_desc":       fib_desc,
+        "fib_retroceso":  retroceso_ratio if (rango > 0 and es_alcista) else None,
+        "fib_rebote":     rebote_ratio    if (rango > 0 and not es_alcista) else None,
     }
 
 # ========================= PARTE 4 / 10 =========================
@@ -799,7 +879,7 @@ with tabs[0]:
             height=300,
             margin=dict(l=10, r=60, t=40, b=10),
         )
-        fig_idx.add_vline(x=0, line_color="gray", line_width=1)
+        fig_idx.add_vline(x=0, line_color="white", line_width=1)
         st.plotly_chart(fig_idx, use_container_width=True)
 
 # ========================= PARTE 5 / 10 =========================
@@ -970,7 +1050,7 @@ with tabs[3]:
         labels={"value": "Precio final (USD)"},
         template="plotly_dark", color_discrete_sequence=["#4FC3F7"],
     )
-    fig_hist.add_vline(x=p_actual, line_dash="dash", line_color="gray",
+    fig_hist.add_vline(x=p_actual, line_dash="dash", line_color="white",
                        annotation_text="Precio actual")
     st.plotly_chart(fig_hist, use_container_width=True)
 
@@ -1072,7 +1152,7 @@ with tabs[4]:
     # Precio + MAs
     fig_tec.add_trace(
         go.Scatter(x=ind_df.index, y=ind_df["Precio"],
-                   name="Precio", line=dict(color="gray", width=1)),
+                   name="Precio", line=dict(color="white", width=1)),
         row=1, col=1
     )
     for ma, color in [("MA5","cyan"),("MA10","yellow"),("MA20","orange"),("MA200","red")]:
@@ -1220,7 +1300,7 @@ with tabs[4]:
             x=df_fib_rango.index,
             y=df_fib_rango.values,
             name="Precio",
-            line=dict(color="Red", width=2),
+            line=dict(color="white", width=2),
             mode="lines",
         ))
 
@@ -1339,16 +1419,45 @@ with tabs[4]:
 - **Tendencia:** {etiqueta_tendencia}
 """)
 
-    senales_df = pd.DataFrame([
-        {
-            "Indicador": k,
-            "Señal": "🟢 ALCISTA" if v > 0 else ("🔴 BAJISTA" if v < 0 else "⚪ NEUTRAL"),
+    # Tabla de señales con nota explicativa en Fibonacci
+    filas_senales = []
+    for k, v in sen["señales"].items():
+        emoji  = "🟢 ALCISTA" if v > 0 else ("🔴 BAJISTA" if v < 0 else "⚪ NEUTRAL")
+        nota   = ""
+        if k == "Fibonacci":
+            nota = sen.get("fib_desc", "")
+        filas_senales.append({
+            "Indicador":  k,
+            "Señal":      emoji,
             "Puntuación": v,
-        }
-        for k, v in sen["señales"].items()
-    ])
-    st.dataframe(senales_df, use_container_width=True)
-    st.write(f"**Score técnico:** {sen['score_tecnico']:.4f}")
+            "Detalle":    nota,
+        })
+    senales_df = pd.DataFrame(filas_senales)
+    st.dataframe(senales_df, use_container_width=True, hide_index=True)
+
+    # Métricas de resumen del análisis técnico
+    col_sc1, col_sc2, col_sc3 = st.columns(3)
+    col_sc1.metric("Score técnico", f"{sen['score_tecnico']:+.4f}")
+    col_sc2.metric(
+        "Tendencia Fibonacci",
+        sen.get("fib_tendencia", "N/D"),
+        help="Detectada por regresión lineal sobre el período completo"
+    )
+    # Mostrar retroceso o rebote según tendencia
+    if sen.get("fib_retroceso") is not None:
+        col_sc3.metric(
+            "Retroceso desde máx",
+            f"{sen['fib_retroceso']*100:.1f}%",
+            delta="OK < 38.2%" if sen["fib_retroceso"] <= 0.382 else
+                  ("⚠️ > 61.8%" if sen["fib_retroceso"] >= 0.618 else "Zona media"),
+        )
+    elif sen.get("fib_rebote") is not None:
+        col_sc3.metric(
+            "Rebote desde mín",
+            f"{sen['fib_rebote']*100:.1f}%",
+            delta="✅ > 61.8%" if sen["fib_rebote"] >= 0.618 else
+                  ("⚠️ < 38.2%" if sen["fib_rebote"] <= 0.382 else "Zona media"),
+        )
     score_tecnico = sen["score_tecnico"]
 
 # ========================= PARTE 8 / 10 =========================

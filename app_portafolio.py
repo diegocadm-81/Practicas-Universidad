@@ -633,3 +633,100 @@ with tabs[4]:
                      value=fund["Beta"] if not pd.isna(fund["Beta"]) else 1.0,
                       format="%.4f"
                   )
+                          kd       = st.number_input("Costo de la deuda kd (decimal)", value=0.05, format="%.4f")
+            w_equity = st.number_input("Peso del equity (decimal)", value=0.80, format="%.4f")
+            acciones = st.number_input("Acciones en circulación", value=1e9, format="%.0f")
+
+        calcular_dcf = st.button("Calcular Valor Intrínseco (DCF)")
+
+    if calcular_dcf and uo > 0:
+        # Cálculo del WACC
+        ke   = rf_dcf + beta_dcf * (r_mdo - rf_dcf)
+        kd_d = kd * (1 - tasa_imp)
+        wacc = ke * w_equity + kd_d * (1 - w_equity)
+
+        # Flujo de caja libre
+        uodi = uo * (1 - tasa_imp)
+        fcf  = uodi + dda - delta_ktno - capex
+
+        # Supuestos de crecimiento
+        g_crec = 0.07
+        g_term = 0.025
+
+        # Proyección 5 años
+        flujos   = [fcf * (1 + g_crec)**t for t in range(1, 6)]
+        vp_flujos = sum(f / (1 + wacc)**t for t, f in enumerate(flujos, 1))
+
+        # Valor terminal
+        val_term  = flujos[-1] * (1 + g_term) / (wacc - g_term) if wacc > g_term else 0
+        vp_term   = val_term / (1 + wacc)**5
+
+        # Valor del equity
+        equity_val = vp_flujos + vp_term
+        po_dcf     = equity_val / acciones if acciones > 0 else 0
+
+        precio_mdo   = fund.get("precio") or 0
+        potencial_dcf = (po_dcf / precio_mdo - 1) if precio_mdo > 0 else 0
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("WACC", f"{wacc*100:.2f}%")
+        c2.metric("FCF calculado", f"${fcf:,.0f}")
+        c3.metric("PO por DCF", f"${po_dcf:.2f}")
+        c4.metric("Potencial", f"{potencial_dcf*100:+.1f}%")
+
+        score_fundamental = float(np.clip(potencial_dcf * 2, -1, 1))
+        st.write(f"**Score fundamental (DCF):** {score_fundamental:.4f}")
+
+    else:
+        # Score fundamental aproximado si no hay DCF
+        pe = fund.get("P/E")
+        if pe and not pd.isna(pe):
+            score_fundamental = 0.5 if pe < 15 else (-0.5 if pe > 30 else 0.0)
+        st.info(f"ℹ️ Sin datos DCF. Score aproximado por P/E: {score_fundamental:.2f}")
+
+    # ── RECOMENDACIÓN FINAL ───────────────────────────────────────────────────
+    st.subheader("✅ Recomendación Final Ponderada")
+    rec = recomendacion_final(
+        score_tecnico, score_estadistico, score_fundamental,
+        peso_tec, peso_est, peso_fund,
+    )
+
+    st.markdown(f"""
+| Tipo de Análisis     | Score       | Peso   | Ponderado |
+|----------------------|-------------|--------|-----------|
+| Análisis Técnico     | {rec['score_tec']:+.4f} | {peso_tec*100:.0f}% | {rec['score_tec']*peso_tec/max(suma_pesos,0.01):+.4f} |
+| Análisis Estadístico | {rec['score_est']:+.4f} | {peso_est*100:.0f}% | {rec['score_est']*peso_est/max(suma_pesos,0.01):+.4f} |
+| Análisis Fundamental | {rec['score_fund']:+.4f} | {peso_fund*100:.0f}% | {rec['score_fund']*peso_fund/max(suma_pesos,0.01):+.4f} |
+| **SCORE FINAL**      | **{rec['score']:+.4f}** | 100% | |
+""")
+
+    color_bg = {"green": "#1a4d1a", "red": "#4d1a1a", "orange": "#4d3a00"}
+    st.markdown(
+        f"""
+        <div style='background-color:{color_bg[rec["color"]]};
+                    border-left:6px solid {rec["color"]};
+                    padding:20px; border-radius:8px; margin-top:10px;'>
+            <h2 style='color:{rec["color"]}; margin:0;'>{rec["recomendacion"]}</h2>
+            <p style='color:#ddd; margin:8px 0 0 0;'>{rec["descripcion"]}</p>
+            <p style='color:#aaa; font-size:0.85rem; margin:4px 0 0 0;'>
+                Score final: <strong>{rec['score']:+.4f}</strong>
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PIE DE PÁGINA
+# ─────────────────────────────────────────────────────────────────────────────
+st.divider()
+st.markdown(
+    """
+    <div style='text-align:center; color:#555; font-size:0.8rem;'>
+        Analizador de Portafolios & Valoración · Desarrollado por <strong>Diego CR</strong><br>
+        Resultados meramente informativos · No constituyen asesoría de inversión ·
+        Datos: Yahoo Finance vía <code>yfinance</code>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)

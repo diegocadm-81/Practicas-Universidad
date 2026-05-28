@@ -70,12 +70,12 @@ with st.sidebar:
 
     tickers_input = st.text_area(
         "Tickers del portafolio (separados por coma)",
-        value="SPY, QQQ, IWM, EFA, EEM",
+        value="XLK, QQQ, IWM, EFA, EEM",
         help="Ejemplo: AAPL, MSFT, AMZN, GOOGL",
     )
     benchmark_input = st.text_input(
         "Ticker del Benchmark",
-        value="SPY",
+        value="^GSPC",
         help="Índice de referencia. Ejemplo: ^GSPC para S&P 500",
     )
     periodo = st.selectbox(

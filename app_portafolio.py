@@ -628,5 +628,8 @@ with tabs[4]:
             with c2:
                 rf_dcf   = st.number_input("Tasa libre de riesgo",      value=rf,   format="%.4f")
                 r_mdo    = st.number_input("Retorno esperado del mercado", value=0.12, format="%.4f")
-                beta_dcf = st.number_input("Beta del activo",
-                                           value=fund["Beta"] if not pd.isna(fund["Beta"]) else 1.
+                beta_dcf = st.number_input(
+                    "Beta del activo",
+                     value=fund["Beta"] if not pd.isna(fund["Beta"]) else 1.0,
+                      format="%.4f"
+                  )

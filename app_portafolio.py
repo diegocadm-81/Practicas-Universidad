@@ -799,7 +799,7 @@ with tabs[0]:
             height=300,
             margin=dict(l=10, r=60, t=40, b=10),
         )
-        fig_idx.add_vline(x=0, line_color="white", line_width=1)
+        fig_idx.add_vline(x=0, line_color="gray", line_width=1)
         st.plotly_chart(fig_idx, use_container_width=True)
 
 # ========================= PARTE 5 / 10 =========================
@@ -970,7 +970,7 @@ with tabs[3]:
         labels={"value": "Precio final (USD)"},
         template="plotly_dark", color_discrete_sequence=["#4FC3F7"],
     )
-    fig_hist.add_vline(x=p_actual, line_dash="dash", line_color="white",
+    fig_hist.add_vline(x=p_actual, line_dash="dash", line_color="gray",
                        annotation_text="Precio actual")
     st.plotly_chart(fig_hist, use_container_width=True)
 
@@ -1072,7 +1072,7 @@ with tabs[4]:
     # Precio + MAs
     fig_tec.add_trace(
         go.Scatter(x=ind_df.index, y=ind_df["Precio"],
-                   name="Precio", line=dict(color="white", width=1)),
+                   name="Precio", line=dict(color="gray", width=1)),
         row=1, col=1
     )
     for ma, color in [("MA5","cyan"),("MA10","yellow"),("MA20","orange"),("MA200","red")]:
@@ -1220,7 +1220,7 @@ with tabs[4]:
             x=df_fib_rango.index,
             y=df_fib_rango.values,
             name="Precio",
-            line=dict(color="white", width=2),
+            line=dict(color="Red", width=2),
             mode="lines",
         ))
 

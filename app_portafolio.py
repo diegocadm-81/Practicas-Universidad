@@ -1,3 +1,4 @@
+"""
 ================================================================================
   ANALIZADOR DE PORTAFOLIOS & VALORACIÓN DE ACTIVOS
   Autor: Diego CR

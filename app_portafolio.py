@@ -1114,93 +1114,230 @@ with tabs[4]:
     fig_tec.update_layout(height=700, template="plotly_dark", hovermode="x unified")
     st.plotly_chart(fig_tec, use_container_width=True)
 
-    # ── Gráfico B: Fibonacci independiente ────────────────────────────────────
+    # ── Gráfico B: Fibonacci con rango ajustable y tendencia detectada ──────
     st.markdown("##### 🌀 Retrocesos de Fibonacci")
     st.caption(
-        "Niveles calculados sobre el máximo y mínimo del período analizado. "
-        "Soportes y resistencias clave para identificar zonas de reversión."
+        "Selecciona el rango de fechas para calcular el máximo y mínimo del swing. "
+        "Los niveles se recalculan automáticamente según el rango y la tendencia detectada."
     )
 
-    # Colores y estilos por nivel
-    FIBO_ESTILOS = {
-        "Fibo 0%":    ("#95a5a6", "dot"),
-        "Fibo 23.6%": ("#3498db", "dash"),
-        "Fibo 38.2%": ("#2ecc71", "dashdot"),
-        "Fibo 50%":   ("#f1c40f", "solid"),
-        "Fibo 61.8%": ("#e67e22", "dashdot"),
-        "Fibo 100%":  ("#e74c3c", "dot"),
-    }
+    # ── Control de rango de fechas ────────────────────────────────────────────
+    fechas_disponibles = ind_df.index.tolist()
+    fecha_min_disp = fechas_disponibles[0].date() if hasattr(fechas_disponibles[0], "date") else fechas_disponibles[0]
+    fecha_max_disp = fechas_disponibles[-1].date() if hasattr(fechas_disponibles[-1], "date") else fechas_disponibles[-1]
 
-    fig_fib = go.Figure()
-
-    # Precio como candela simplificada (línea de área)
-    fig_fib.add_trace(go.Scatter(
-        x=ind_df.index, y=ind_df["Precio"],
-        name="Precio", line=dict(color="white", width=1),
-        fill="tozeroy", fillcolor="rgba(255,255,255,0.04)",
-    ))
-
-    # Niveles horizontales de Fibonacci
-    for nombre_f, val_f in sen["fibo_niveles"].items():
-        color_f, dash_f = FIBO_ESTILOS.get(nombre_f, ("#888888", "dot"))
-        fig_fib.add_hline(
-            y=val_f,
-            line_dash=dash_f,
-            line_color=color_f,
-            line_width=1.5,
-            annotation_text=f"  {nombre_f}: {val_f:.2f}",
-            annotation_font_size=10,
-            annotation_font_color=color_f,
+    col_fi, col_ff = st.columns(2)
+    with col_fi:
+        fib_fecha_ini = st.date_input(
+            "📅 Fecha inicio Fibonacci",
+            value=fecha_min_disp,
+            min_value=fecha_min_disp,
+            max_value=fecha_max_disp,
+            key=f"fib_ini_{ticker_val}",
+        )
+    with col_ff:
+        fib_fecha_fin = st.date_input(
+            "📅 Fecha fin Fibonacci",
+            value=fecha_max_disp,
+            min_value=fecha_min_disp,
+            max_value=fecha_max_disp,
+            key=f"fib_fin_{ticker_val}",
         )
 
-    # Marcar el precio actual con una línea y anotación destacada
-    p_actual_fib = float(ind_df["Precio"].iloc[-1])
-    fig_fib.add_hline(
-        y=p_actual_fib,
-        line_color="#00e5ff", line_width=2, line_dash="solid",
-        annotation_text=f"  ◀ Precio actual: {p_actual_fib:.2f}",
-        annotation_font_size=11,
-        annotation_font_color="#00e5ff",
+    # Filtrar precios al rango seleccionado
+    mask_fib = (
+        ind_df.index >= pd.Timestamp(fib_fecha_ini)
+    ) & (
+        ind_df.index <= pd.Timestamp(fib_fecha_fin)
     )
+    df_fib_rango = ind_df.loc[mask_fib, "Precio"]
 
-    # Zona de soporte (38.2% – 61.8%) sombreada
-    fib_vals = list(sen["fibo_niveles"].values())
-    fib_keys = list(sen["fibo_niveles"].keys())
-    y_382 = sen["fibo_niveles"].get("Fibo 38.2%", fib_vals[2])
-    y_618 = sen["fibo_niveles"].get("Fibo 61.8%", fib_vals[4])
-    fig_fib.add_hrect(
-        y0=y_382, y1=y_618,
-        fillcolor="rgba(241,196,15,0.06)",
-        line_width=0,
-        annotation_text="Zona clave 38.2%–61.8%",
-        annotation_font_size=9,
-        annotation_font_color="#f1c40f",
-    )
+    if len(df_fib_rango) < 2:
+        st.warning("⚠️ Rango muy corto. Selecciona un período más amplio.")
+    else:
+        # ── Detectar tendencia en el rango seleccionado ───────────────────────
+        # Comparamos el precio al inicio vs al final del rango.
+        # Tendencia alcista  → el movimiento va de mínimo → máximo (retrocesos desde el pico).
+        # Tendencia bajista  → el movimiento va de máximo → mínimo (retrocesos desde el suelo).
+        precio_inicio_fib = float(df_fib_rango.iloc[0])
+        precio_fin_fib    = float(df_fib_rango.iloc[-1])
+        p_max_fib = float(df_fib_rango.max())
+        p_min_fib = float(df_fib_rango.min())
 
-    fig_fib.update_layout(
-        title=f"Retrocesos de Fibonacci – {ticker_val}",
-        yaxis_title="Precio",
-        template="plotly_dark",
-        height=420,
-        hovermode="x unified",
-        showlegend=True,
-    )
-    st.plotly_chart(fig_fib, use_container_width=True)
+        # Detectamos tendencia usando la pendiente de una regresión lineal rápida
+        x_reg = np.arange(len(df_fib_rango))
+        pendiente = np.polyfit(x_reg, df_fib_rango.values, 1)[0]
+        tendencia_alcista = pendiente >= 0
 
-    # Tabla resumen de niveles Fibonacci
-    fib_df = pd.DataFrame([
-        {
-            "Nivel": k,
-            "Precio": f"{v:.2f}",
-            "Posición vs actual": (
-                "🔴 Resistencia" if v > p_actual_fib else
-                ("✅ Soporte"     if v < p_actual_fib else "◀ Precio actual")
-            ),
-            "Distancia %": f"{(v / p_actual_fib - 1) * 100:+.2f}%",
+        # ── Lógica de Fibonacci según tendencia ──────────────────────────────
+        # ALCISTA: el swing completo va de mínimo (soporte) a máximo (resistencia).
+        #   → Los niveles son retrocesos desde el máximo hacia abajo.
+        #   → Fibo 0% = máximo | Fibo 100% = mínimo
+        # BAJISTA: el swing completo va de máximo (techo) a mínimo (suelo).
+        #   → Los niveles son retrocesos desde el mínimo hacia arriba.
+        #   → Fibo 0% = mínimo | Fibo 100% = máximo
+        if tendencia_alcista:
+            fib_origen = p_max_fib   # desde donde retrocede (resistencia)
+            fib_destino = p_min_fib  # hasta donde puede llegar el retroceso (soporte)
+            etiqueta_tendencia = "🟢 Alcista — retrocesos desde el máximo"
+        else:
+            fib_origen = p_min_fib   # desde donde rebota (soporte)
+            fib_destino = p_max_fib  # hasta donde puede llegar el rebote (resistencia)
+            etiqueta_tendencia = "🔴 Bajista — retrocesos desde el mínimo"
+
+        rango_fib  = abs(fib_origen - fib_destino)
+        RATIOS_FIB = [0.0, 0.236, 0.382, 0.500, 0.618, 0.786, 1.0]
+        NOMBRES_FIB = ["0%", "23.6%", "38.2%", "50%", "61.8%", "78.6%", "100%"]
+
+        # Para tendencia alcista los niveles van de máx hacia abajo; para bajista de mín hacia arriba
+        if tendencia_alcista:
+            niveles_fib_rango = {
+                f"Fibo {n}": fib_origen - ratio * rango_fib
+                for ratio, n in zip(RATIOS_FIB, NOMBRES_FIB)
+            }
+        else:
+            niveles_fib_rango = {
+                f"Fibo {n}": fib_origen + ratio * rango_fib
+                for ratio, n in zip(RATIOS_FIB, NOMBRES_FIB)
+            }
+
+        # ── Colores y estilos ─────────────────────────────────────────────────
+        FIBO_ESTILOS = {
+            "Fibo 0%":    ("#95a5a6", "dot",     1.2),
+            "Fibo 23.6%": ("#3498db", "dash",    1.5),
+            "Fibo 38.2%": ("#2ecc71", "dashdot", 1.5),
+            "Fibo 50%":   ("#f1c40f", "solid",   2.0),
+            "Fibo 61.8%": ("#e67e22", "dashdot", 1.5),
+            "Fibo 78.6%": ("#9b59b6", "dash",    1.5),
+            "Fibo 100%":  ("#e74c3c", "dot",     1.2),
         }
-        for k, v in sen["fibo_niveles"].items()
-    ])
-    st.dataframe(fib_df, use_container_width=True, hide_index=True)
+
+        # ── Construir el gráfico ──────────────────────────────────────────────
+        fig_fib = go.Figure()
+
+        # Precio real del activo en el rango (línea sólida, visible, SIN fill)
+        fig_fib.add_trace(go.Scatter(
+            x=df_fib_rango.index,
+            y=df_fib_rango.values,
+            name="Precio",
+            line=dict(color="white", width=2),
+            mode="lines",
+        ))
+
+        # Niveles de Fibonacci como líneas dispersas (scatter) para que aparezcan
+        # en la leyenda y respeten el eje Y del precio — más confiable que add_hline
+        x_inicio = df_fib_rango.index[0]
+        x_fin    = df_fib_rango.index[-1]
+        for nombre_f, val_f in niveles_fib_rango.items():
+            color_f, dash_f, width_f = FIBO_ESTILOS.get(nombre_f, ("#888888", "dot", 1.2))
+            fig_fib.add_trace(go.Scatter(
+                x=[x_inicio, x_fin],
+                y=[val_f, val_f],
+                mode="lines",
+                name=f"{nombre_f}: {val_f:.2f}",
+                line=dict(color=color_f, dash=dash_f, width=width_f),
+                hovertemplate=f"{nombre_f}: {val_f:.2f}<extra></extra>",
+            ))
+
+        # Línea del precio actual (último dato del rango)
+        p_actual_fib = float(df_fib_rango.iloc[-1])
+        fig_fib.add_trace(go.Scatter(
+            x=[x_inicio, x_fin],
+            y=[p_actual_fib, p_actual_fib],
+            mode="lines",
+            name=f"◀ Actual: {p_actual_fib:.2f}",
+            line=dict(color="#00e5ff", width=2.5, dash="solid"),
+            hovertemplate=f"Precio actual: {p_actual_fib:.2f}<extra></extra>",
+        ))
+
+        # Zona sombreada entre los dos niveles clave (38.2% y 61.8%)
+        y_382 = niveles_fib_rango.get("Fibo 38.2%", None)
+        y_618 = niveles_fib_rango.get("Fibo 61.8%", None)
+        if y_382 and y_618:
+            y0_zona, y1_zona = sorted([y_382, y_618])
+            fig_fib.add_hrect(
+                y0=y0_zona, y1=y1_zona,
+                fillcolor="rgba(241,196,15,0.07)",
+                line_width=0,
+            )
+
+        # Anotación de tendencia detectada
+        fig_fib.add_annotation(
+            x=df_fib_rango.index[len(df_fib_rango)//4],
+            y=p_max_fib,
+            text=etiqueta_tendencia,
+            showarrow=False,
+            font=dict(size=11, color="#aaaaaa"),
+            bgcolor="rgba(0,0,0,0.5)",
+            bordercolor="#555",
+        )
+
+        # Máximo y mínimo del rango marcados con marcadores
+        idx_max = df_fib_rango.idxmax()
+        idx_min = df_fib_rango.idxmin()
+        fig_fib.add_trace(go.Scatter(
+            x=[idx_max], y=[p_max_fib],
+            mode="markers+text",
+            name="Máx rango",
+            marker=dict(color="#e74c3c", size=10, symbol="triangle-up"),
+            text=[f"  Máx: {p_max_fib:.2f}"],
+            textposition="top right",
+            textfont=dict(color="#e74c3c", size=9),
+            showlegend=False,
+        ))
+        fig_fib.add_trace(go.Scatter(
+            x=[idx_min], y=[p_min_fib],
+            mode="markers+text",
+            name="Mín rango",
+            marker=dict(color="#2ecc71", size=10, symbol="triangle-down"),
+            text=[f"  Mín: {p_min_fib:.2f}"],
+            textposition="bottom right",
+            textfont=dict(color="#2ecc71", size=9),
+            showlegend=False,
+        ))
+
+        fig_fib.update_layout(
+            title=f"Retrocesos de Fibonacci – {ticker_val}  |  {etiqueta_tendencia}",
+            yaxis_title="Precio",
+            xaxis_title="Fecha",
+            template="plotly_dark",
+            height=480,
+            hovermode="x unified",
+            legend=dict(
+                orientation="v",
+                x=1.01, y=1,
+                bgcolor="rgba(0,0,0,0.5)",
+                font=dict(size=10),
+            ),
+        )
+        st.plotly_chart(fig_fib, use_container_width=True)
+
+        # ── Tabla resumen de niveles ──────────────────────────────────────────
+        fib_df = pd.DataFrame([
+            {
+                "Nivel": k,
+                "Precio": f"{v:.2f}",
+                "Posición vs precio actual": (
+                    "🔴 Resistencia" if v > p_actual_fib + 0.01 else
+                    ("✅ Soporte"     if v < p_actual_fib - 0.01 else "◀ Precio actual")
+                ),
+                "Distancia %": f"{(v / p_actual_fib - 1) * 100:+.2f}%",
+            }
+            for k, v in niveles_fib_rango.items()
+        ])
+        col_tabla, col_info = st.columns([2, 1])
+        with col_tabla:
+            st.dataframe(fib_df, use_container_width=True, hide_index=True)
+        with col_info:
+            st.markdown(f"""
+**Rango analizado:**
+- Inicio: `{fib_fecha_ini}`
+- Fin: `{fib_fecha_fin}`
+- **Máximo:** `{p_max_fib:.2f}`
+- **Mínimo:** `{p_min_fib:.2f}`
+- **Rango:** `{rango_fib:.2f}` ({rango_fib/p_min_fib*100:.1f}%)
+- **Tendencia:** {etiqueta_tendencia}
+""")
 
     senales_df = pd.DataFrame([
         {

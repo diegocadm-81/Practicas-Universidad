@@ -686,25 +686,121 @@ tabs = st.tabs([
 # ═════════════════════════════════════════════════════════════════════════════
 #  TAB 0: MACRO & RESUMEN
 # ═════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNCIÓN: descarga de índices globales para el panel Macro
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False, ttl=3600)
+def obtener_indices_globales() -> dict:
+    """
+    Descarga el precio actual y la variación diaria (%) de 6 índices/activos
+    representativos del mercado global. TTL = 1 hora para no sobrecargar la API.
+    Tickers:
+      ^GSPC  = S&P 500            ^IXIC  = NASDAQ Composite
+      ^DJI   = Dow Jones          ^COLCAP = Colcap Colombia
+      GC=F   = Oro (futuros)      CL=F   = Petróleo WTI (futuros)
+    """
+    INDICES = {
+        "S&P 500":   "^GSPC",
+        "Dow Jones": "^DJI",
+        "NASDAQ":    "^IXIC",
+        "Colcap":    "^COLCAP",
+        "Oro":       "GC=F",
+        "WTI":       "CL=F",
+    }
+    resultados = {}
+    for nombre, ticker_idx in INDICES.items():
+        try:
+            # Descargamos los últimos 5 días para calcular la variación diaria
+            tmp = yf.download(ticker_idx, period="5d", auto_adjust=True, progress=False)
+            # Extraer serie Close compatible con cualquier versión de yfinance
+            if isinstance(tmp.columns, pd.MultiIndex):
+                close = tmp["Close"].squeeze()
+            else:
+                close = tmp["Close"] if "Close" in tmp.columns else tmp.iloc[:, 0]
+            close = pd.to_numeric(close, errors="coerce").dropna()
+            if len(close) >= 2:
+                ultimo  = float(close.iloc[-1])
+                anterior = float(close.iloc[-2])
+                cambio_pct = (ultimo / anterior - 1) * 100
+                resultados[nombre] = {"precio": ultimo, "cambio": cambio_pct, "ticker": ticker_idx}
+            elif len(close) == 1:
+                resultados[nombre] = {"precio": float(close.iloc[0]), "cambio": 0.0, "ticker": ticker_idx}
+        except Exception:
+            resultados[nombre] = {"precio": np.nan, "cambio": np.nan, "ticker": ticker_idx}
+    return resultados
+
+
 with tabs[0]:
     st.header("🌍 Indicadores Macroeconómicos & Resumen de Tickers")
 
+    # ── Fila 1: TRM + índices globales ────────────────────────────────────────
+    st.subheader("📡 Indicadores de mercado en tiempo real")
+
+    with st.spinner("Obteniendo índices globales..."):
+        trm      = obtener_trm_colombia()
+        indices  = obtener_indices_globales()
+
+    # TRM en su propia métrica prominente
+    col_trm, col_sep = st.columns([1, 5])
+    with col_trm:
+        if not np.isnan(trm):
+            st.metric("💱 TRM COP/USD", f"{trm:,.2f}", help="Fuente: datos.gov.co")
+        else:
+            st.metric("💱 TRM COP/USD", "N/D")
+
+    # Índices globales: una métrica por columna
+    st.markdown("**Índices & Commodities**")
+    cols_idx = st.columns(len(indices))
+    for col_i, (nombre, datos) in zip(cols_idx, indices.items()):
+        precio  = datos["precio"]
+        cambio  = datos["cambio"]
+        ticker_idx = datos["ticker"]
+        if np.isnan(precio):
+            col_i.metric(nombre, "N/D", help=ticker_idx)
+        else:
+            delta_str = f"{cambio:+.2f}%" if not np.isnan(cambio) else None
+            col_i.metric(
+                label=nombre,
+                value=f"{precio:,.2f}",
+                delta=delta_str,
+                help=f"Ticker: {ticker_idx}",
+            )
+
+    st.divider()
+
+    # ── Fila 2: Clasificación de tickers ─────────────────────────────────────
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("💱 TRM COP/USD")
-        trm = obtener_trm_colombia()
-        if np.isnan(trm):
-            st.warning("No se pudo obtener la TRM actual.")
-        else:
-            st.metric("TRM Hoy (COP/USD)", f"{trm:,.2f}")
-        st.caption("Fuente: datos.gov.co")
-
-    with col2:
-        st.subheader("📋 Clasificación de Tickers")
+        st.subheader("📋 Clasificación de Tickers del Portafolio")
         resumen = [clasificar_ticker(t) for t in tickers_raw]
         df_resumen = pd.DataFrame(resumen)
         st.dataframe(df_resumen, use_container_width=True)
+
+    with col2:
+        st.subheader("📊 Variación diaria de índices globales")
+        # Mini gráfico de barras horizontal con los cambios %
+        nombres_idx = list(indices.keys())
+        cambios_idx = [indices[n]["cambio"] for n in nombres_idx]
+        colores_idx = ["#2ecc71" if c >= 0 else "#e74c3c" for c in cambios_idx]
+
+        fig_idx = go.Figure(go.Bar(
+            x=cambios_idx,
+            y=nombres_idx,
+            orientation="h",
+            marker_color=colores_idx,
+            text=[f"{c:+.2f}%" if not np.isnan(c) else "N/D" for c in cambios_idx],
+            textposition="outside",
+        ))
+        fig_idx.update_layout(
+            title="Variación diaria (%)",
+            xaxis_title="Cambio %",
+            template="plotly_dark",
+            height=300,
+            margin=dict(l=10, r=60, t=40, b=10),
+        )
+        fig_idx.add_vline(x=0, line_color="white", line_width=1)
+        st.plotly_chart(fig_idx, use_container_width=True)
 
 # ========================= PARTE 5 / 10 =========================
 # ═════════════════════════════════════════════════════════════════════════════
@@ -887,19 +983,71 @@ with tabs[4]:
 
     ticker_val = st.selectbox("Selecciona el ticker a valorar", options=tickers_ok, key="val_sel")
 
+    # ── Detectar tipo de activo para ajustar pesos por defecto ──────────────
+    @st.cache_data(show_spinner=False)
+    def _detectar_tipo(ticker_sym: str) -> str:
+        """Devuelve 'ETF', 'Acción' u 'Otro' consultando yfinance.info."""
+        try:
+            info = yf.Ticker(ticker_sym).info
+            qt   = str(info.get("quoteType", "")).upper()
+            if qt == "ETF" or info.get("fundFamily"):
+                return "ETF"
+            elif qt == "EQUITY":
+                return "Acción"
+            return qt or "Otro"
+        except Exception:
+            return "Otro"
+
+    tipo_val = _detectar_tipo(ticker_val)
+
+    # Si es ETF (u otro sin estados financieros) → fundamental = 0, técnico 50, estadístico 50
+    # Si es acción → distribuir 33/33/34 por defecto
+    _es_sin_fundamentales = tipo_val in ("ETF", "INDEX", "FUTURE", "CURRENCY", "CRYPTOCURRENCY", "Otro")
+
+    _def_tec  = 50 if _es_sin_fundamentales else 33
+    _def_est  = 50 if _es_sin_fundamentales else 33
+    _def_fund = 0  if _es_sin_fundamentales else 34
+
     st.subheader("🎛️ Ponderación de métodos")
-    st.caption("La suma debe ser 100%. Se normaliza automáticamente si no lo es.")
+
+    if _es_sin_fundamentales:
+        st.info(
+            f"ℹ️ **{ticker_val}** detectado como **{tipo_val}** — sin estados financieros. "
+            "El análisis fundamental se fija en **0%** por defecto. "
+            "Puedes ajustar los pesos manualmente."
+        )
+    else:
+        st.caption("La suma debe ser 100%. Se normaliza automáticamente si no lo es.")
+
     c1, c2, c3 = st.columns(3)
     with c1:
-        peso_tec  = st.slider("Análisis Técnico (%)",     0, 100, 33, step=1) / 100
+        peso_tec  = st.slider(
+            "📉 Análisis Técnico (%)", 0, 100, _def_tec,  step=1,
+            key=f"sl_tec_{ticker_val}"
+        ) / 100
     with c2:
-        peso_est  = st.slider("Análisis Estadístico (%)", 0, 100, 33, step=1) / 100
+        peso_est  = st.slider(
+            "📐 Análisis Estadístico (%)", 0, 100, _def_est,  step=1,
+            key=f"sl_est_{ticker_val}"
+        ) / 100
     with c3:
-        peso_fund = st.slider("Análisis Fundamental (%)", 0, 100, 34, step=1) / 100
+        peso_fund = st.slider(
+            "🏦 Análisis Fundamental (%)",
+            0, 100,
+            _def_fund,
+            step=1,
+            disabled=_es_sin_fundamentales,   # bloqueado si es ETF; el usuario puede desbloquearlo
+            key=f"sl_fund_{ticker_val}",
+            help="Desactivado para ETFs y activos sin estados financieros." if _es_sin_fundamentales else None,
+        ) / 100
+
+    # Si el slider fundamental está desactivado forzamos 0
+    if _es_sin_fundamentales:
+        peso_fund = 0.0
 
     suma_pesos = peso_tec + peso_est + peso_fund
     if abs(suma_pesos - 1.0) > 0.01:
-        st.warning(f"⚠️ Los pesos suman {suma_pesos*100:.1f}%. Se normalizarán.")
+        st.warning(f"⚠️ Los pesos suman {suma_pesos*100:.1f}%. Se normalizarán automáticamente.")
 
     # ─────────────────────────────────────────────────────────────────────────
     # ANÁLISIS TÉCNICO
@@ -910,12 +1058,14 @@ with tabs[4]:
     ind_df    = calcular_indicadores_tecnicos(precios_t)
     sen       = senal_tecnica(ind_df)
 
+    # ── Gráfico A: Medias Móviles + RSI + MACD ───────────────────────────────
+    st.markdown("##### 📈 Medias Móviles, RSI y MACD")
     fig_tec = make_subplots(
         rows=3, cols=1, shared_xaxes=True,
         row_heights=[0.5, 0.25, 0.25],
         subplot_titles=[
             f"{ticker_val} – Precio y Medias Móviles",
-            "RSI (14)", "MACD"
+            "RSI (14)", "MACD (12-26-9)"
         ]
     )
 
@@ -932,44 +1082,125 @@ with tabs[4]:
             row=1, col=1
         )
 
-    # Fibonacci
-    for nombre_f, val_f in sen["fibo_niveles"].items():
-        fig_tec.add_hline(
-            y=val_f, line_dash="dot",
-            line_color="rgba(255,215,0,0.35)",
-            annotation_text=nombre_f,
-            annotation_font_size=9,
-            row=1, col=1
-        )
-
     # RSI
     fig_tec.add_trace(
         go.Scatter(x=ind_df.index, y=ind_df["RSI"],
                    name="RSI", line=dict(color="violet")),
         row=2, col=1
     )
-    fig_tec.add_hline(y=70, line_dash="dash", line_color="red",   row=2, col=1)
-    fig_tec.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+    fig_tec.add_hline(y=70, line_dash="dash", line_color="red",    row=2, col=1,
+                      annotation_text="Sobrecompra (70)", annotation_font_size=9)
+    fig_tec.add_hline(y=50, line_dash="dot",  line_color="gray",   row=2, col=1)
+    fig_tec.add_hline(y=30, line_dash="dash", line_color="green",  row=2, col=1,
+                      annotation_text="Sobreventa (30)", annotation_font_size=9)
 
     # MACD
-    colores_hist = ["green" if v >= 0 else "red" for v in ind_df["Hist"].fillna(0)]
+    colores_hist = ["#2ecc71" if v >= 0 else "#e74c3c" for v in ind_df["Hist"].fillna(0)]
     fig_tec.add_trace(
         go.Bar(x=ind_df.index, y=ind_df["Hist"],
-               name="Histograma", marker_color=colores_hist),
+               name="Histograma", marker_color=colores_hist, opacity=0.7),
         row=3, col=1
     )
     fig_tec.add_trace(
         go.Scatter(x=ind_df.index, y=ind_df["MACD"],
-                   name="MACD", line=dict(color="blue")),
+                   name="MACD", line=dict(color="#3498db", width=1.5)),
         row=3, col=1
     )
     fig_tec.add_trace(
         go.Scatter(x=ind_df.index, y=ind_df["Signal"],
-                   name="Signal", line=dict(color="orange")),
+                   name="Signal", line=dict(color="#f39c12", width=1.5)),
         row=3, col=1
     )
-    fig_tec.update_layout(height=700, template="plotly_dark")
+    fig_tec.update_layout(height=700, template="plotly_dark", hovermode="x unified")
     st.plotly_chart(fig_tec, use_container_width=True)
+
+    # ── Gráfico B: Fibonacci independiente ────────────────────────────────────
+    st.markdown("##### 🌀 Retrocesos de Fibonacci")
+    st.caption(
+        "Niveles calculados sobre el máximo y mínimo del período analizado. "
+        "Soportes y resistencias clave para identificar zonas de reversión."
+    )
+
+    # Colores y estilos por nivel
+    FIBO_ESTILOS = {
+        "Fibo 0%":    ("#95a5a6", "dot"),
+        "Fibo 23.6%": ("#3498db", "dash"),
+        "Fibo 38.2%": ("#2ecc71", "dashdot"),
+        "Fibo 50%":   ("#f1c40f", "solid"),
+        "Fibo 61.8%": ("#e67e22", "dashdot"),
+        "Fibo 100%":  ("#e74c3c", "dot"),
+    }
+
+    fig_fib = go.Figure()
+
+    # Precio como candela simplificada (línea de área)
+    fig_fib.add_trace(go.Scatter(
+        x=ind_df.index, y=ind_df["Precio"],
+        name="Precio", line=dict(color="white", width=1),
+        fill="tozeroy", fillcolor="rgba(255,255,255,0.04)",
+    ))
+
+    # Niveles horizontales de Fibonacci
+    for nombre_f, val_f in sen["fibo_niveles"].items():
+        color_f, dash_f = FIBO_ESTILOS.get(nombre_f, ("#888888", "dot"))
+        fig_fib.add_hline(
+            y=val_f,
+            line_dash=dash_f,
+            line_color=color_f,
+            line_width=1.5,
+            annotation_text=f"  {nombre_f}: {val_f:.2f}",
+            annotation_font_size=10,
+            annotation_font_color=color_f,
+        )
+
+    # Marcar el precio actual con una línea y anotación destacada
+    p_actual_fib = float(ind_df["Precio"].iloc[-1])
+    fig_fib.add_hline(
+        y=p_actual_fib,
+        line_color="#00e5ff", line_width=2, line_dash="solid",
+        annotation_text=f"  ◀ Precio actual: {p_actual_fib:.2f}",
+        annotation_font_size=11,
+        annotation_font_color="#00e5ff",
+    )
+
+    # Zona de soporte (38.2% – 61.8%) sombreada
+    fib_vals = list(sen["fibo_niveles"].values())
+    fib_keys = list(sen["fibo_niveles"].keys())
+    y_382 = sen["fibo_niveles"].get("Fibo 38.2%", fib_vals[2])
+    y_618 = sen["fibo_niveles"].get("Fibo 61.8%", fib_vals[4])
+    fig_fib.add_hrect(
+        y0=y_382, y1=y_618,
+        fillcolor="rgba(241,196,15,0.06)",
+        line_width=0,
+        annotation_text="Zona clave 38.2%–61.8%",
+        annotation_font_size=9,
+        annotation_font_color="#f1c40f",
+    )
+
+    fig_fib.update_layout(
+        title=f"Retrocesos de Fibonacci – {ticker_val}",
+        yaxis_title="Precio",
+        template="plotly_dark",
+        height=420,
+        hovermode="x unified",
+        showlegend=True,
+    )
+    st.plotly_chart(fig_fib, use_container_width=True)
+
+    # Tabla resumen de niveles Fibonacci
+    fib_df = pd.DataFrame([
+        {
+            "Nivel": k,
+            "Precio": f"{v:.2f}",
+            "Posición vs actual": (
+                "🔴 Resistencia" if v > p_actual_fib else
+                ("✅ Soporte"     if v < p_actual_fib else "◀ Precio actual")
+            ),
+            "Distancia %": f"{(v / p_actual_fib - 1) * 100:+.2f}%",
+        }
+        for k, v in sen["fibo_niveles"].items()
+    ])
+    st.dataframe(fib_df, use_container_width=True, hide_index=True)
 
     senales_df = pd.DataFrame([
         {

@@ -856,4 +856,25 @@ with tabs[4]:
                     padding:20px; border-radius:8px; margin-top:10px;'>
             <h2 style='color:{rec["color"]}; margin:0;'>{rec["recomendacion"]}</h2>
             <p style='color:#ddd; margin:8px 0 0 0;'>{rec["descripcion"]}</p>
-            <p style='color:#aaa; font-size:0.85rem; margin:4px
+            <p style='color:#aaa; font-size:0.85rem; margin:4px 0 0 0;'>
+                Score final: <strong>{rec['score']:+.4f}</strong>
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  PIE DE PÁGINA
+# ═════════════════════════════════════════════════════════════════════════════
+st.divider()
+st.markdown(
+    """
+    <div style='text-align:center; color:#555; font-size:0.8rem;'>
+        Analizador de Portafolios & Valoración · Desarrollado por <strong>Diego CR</strong><br>
+        Resultados meramente informativos · No constituyen asesoría de inversión ·
+        Datos: Yahoo Finance vía <code>yfinance</code>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)

@@ -59,7 +59,7 @@ st.markdown(
 # ─────────────────────────────────────────────────────────────────────────────
 TASA_LIBRE_RIESGO = 0.0457   # Tasa libre de riesgo anualizada (US 10Y aprox.)
 DIAS_ANIO = 252              # Días hábiles de mercado por año
-PERIODOS_LABEL = {"1 Año": 1, "3 Años": 3, "5 Años": 5}  # Horizontes de análisis
+PERIODOS_LABEL = {"1 Año": 1, "3 Años": 3, "5 Años": 5, "7 Años": 7, "10 Años": 10, "15 Años": 15, "20 Años": 20}  # Horizontes de análisis
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -72,7 +72,7 @@ with st.sidebar:
     # Campo de texto para múltiples tickers del portafolio, separados por coma
     tickers_input = st.text_area(
         "Tickers del portafolio (separados por coma)",
-        value="QQQ, IWM, EFA, EEM",
+        value="SPY, QQQ, IWM, EFA, EEM",
         help="Ejemplo: AAPL, MSFT, AMZN, GOOGL"
     )
 
@@ -241,9 +241,9 @@ def metricas_anuales(rendimientos: pd.DataFrame, rf_diaria: float) -> pd.DataFra
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FUNCIÓN: índice base 1000 (o base 100)
+# FUNCIÓN: índice base 100
 # ─────────────────────────────────────────────────────────────────────────────
-def base_1000(precios: pd.DataFrame, base: float = 1000.0) -> pd.DataFrame:
+def base_100(precios: pd.DataFrame, base: float = 100.0) -> pd.DataFrame:
     """
     Normaliza todos los precios al mismo punto de partida (base).
     Fórmula: idx_t = (P_t / P_0) * base
@@ -763,7 +763,7 @@ if not btn_analizar:
     st.markdown("""
     **Bienvenido.** Esta herramienta permite:
 
-    - 📊 **Análisis de portafolio**: precios en base 1000, correlaciones, rendimientos históricos
+    - 📊 **Análisis de portafolio**: precios en base 100, correlaciones, rendimientos históricos
     - ⚙️ **Optimización**: Markowitz (mín varianza), máx Sharpe (CAPM) y Monte Carlo
     - 🎲 **Simulación Monte Carlo** de precios futuros (1000 trayectorias)
     - 📉 **Valoración técnica**: Medias móviles, RSI, MACD, Fibonacci
@@ -840,19 +840,19 @@ tabs = st.tabs([
 with tabs[0]:
     st.header("Análisis del Portafolio")
 
-    # ── 1.1 Precios en Base 1000 ───────────────────────────────────────────────
-    st.subheader("Precios normalizados (Base 1000)")
+    # ── 1.1 Precios en Base 100 ────────────────────────────────────────────────
+    st.subheader("Precios normalizados (Base 100)")
     st.caption("Permite comparar el desempeño relativo de activos con distintos niveles de precio.")
 
-    precios_b1000 = base_1000(precios_full, 1000)   # Normalización a base 1000
-    fig_b1000 = px.line(
-        precios_b1000.reset_index(),
-        x="Date", y=precios_b1000.columns.tolist(),
-        title="Evolución de activos en base 1000",
-        labels={"value": "Valor (base 1000)", "Date": "Fecha", "variable": "Ticker"},
+    precios_b100  = base_100(precios_full, 100)     # Normalización a base 100
+    fig_b100 = px.line(
+        precios_b100.reset_index(),
+        x="Date", y=precios_b100.columns.tolist(),
+        title="Evolución de activos en base 100",
+        labels={"value": "Valor (base 100)", "Date": "Fecha", "variable": "Ticker"},
         template="plotly_dark",
     )
-    st.plotly_chart(fig_b1000, use_container_width=True)
+    st.plotly_chart(fig_b100, use_container_width=True)
 
     # ── 1.2 Rendimientos históricos acumulados ─────────────────────────────────
     st.subheader("Rendimientos históricos acumulados")
@@ -871,10 +871,16 @@ with tabs[0]:
     st.subheader("Métricas de rendimiento y riesgo (anualizadas)")
     met = metricas_anuales(rendimientos_full, rf_diaria)
     # Formato porcentual para rendimiento y volatilidad
-    met_fmt = met.copy()
-    met_fmt.loc["Rendimiento EA"]  = met.loc["Rendimiento EA"].map("{:.2%}".format)
-    met_fmt.loc["Volatilidad EA"]  = met.loc["Volatilidad EA"].map("{:.2%}".format)
-    met_fmt.loc["Sharpe Ratio"]    = met.loc["Sharpe Ratio"].map("{:.4f}".format)
+    # Construimos la tabla de formato como objeto string independiente
+    # (pandas >=2 no permite asignar strings a columnas float in-place)
+    met_fmt = pd.DataFrame({
+        col: {
+            "Rendimiento EA": "{:.2%}".format(met.loc["Rendimiento EA", col]),
+            "Volatilidad EA":  "{:.2%}".format(met.loc["Volatilidad EA",  col]),
+            "Sharpe Ratio":    "{:.4f}".format(met.loc["Sharpe Ratio",    col]),
+        }
+        for col in met.columns
+    }).T
     st.dataframe(met_fmt, use_container_width=True)
 
     # ── 1.4 Métricas de riesgo: Beta, VaR, CVaR ───────────────────────────────

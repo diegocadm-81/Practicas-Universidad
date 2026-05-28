@@ -1,4 +1,3 @@
-"""
 ================================================================================
   ANALIZADOR DE PORTAFOLIOS & VALORACIÓN DE ACTIVOS
   Autor: Diego CR
@@ -11,6 +10,7 @@
 import warnings
 warnings.filterwarnings("ignore")
 import datetime
+import requests   # <<< NUEVO: para TRM y datos macro
 
 # ── Librerías de datos y cálculo ─────────────────────────────────────────────
 import numpy as np
@@ -60,7 +60,7 @@ PERIODOS_LABEL = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SIDEBAR
+# SIDEBAR + SESSION_STATE (CORREGIDO)
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("📊 Configuración")
@@ -89,520 +89,118 @@ with st.sidebar:
         format="%.4f",
         help="Ejemplo: 0.0457 = 4.57%",
     )
+
     btn_analizar = st.button("🚀 Analizar Portafolio", type="primary", use_container_width=True)
     st.divider()
     st.caption("**Autor:** Diego CR")
 
+# >>> NUEVO: session_state para evitar que Streamlit te devuelva al inicio
+if "analizar" not in st.session_state:
+    st.session_state.analizar = False
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FUNCIÓN: descargar precios — compatible con yfinance antiguo y moderno
-# ─────────────────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner=False)
-def descargar_precios(tickers: list, benchmark: str, anios: int) -> pd.DataFrame:
-    """
-    Descarga precios de cierre ajustados desde Yahoo Finance.
-    Maneja correctamente todas las estructuras que devuelve yfinance
-    (MultiIndex campo×ticker, ticker×campo, o plano para 1 ticker).
-    Elimina filas donde cualquier ticker no tenga precio.
-    """
-    fecha_fin    = datetime.date.today()
-    fecha_inicio = fecha_fin - datetime.timedelta(days=int(anios * 365.25))
+if btn_analizar:
+    st.session_state.analizar = True
 
-    # Lista sin duplicados preservando orden
-    todos = list(dict.fromkeys([t.upper() for t in tickers] + [benchmark.upper()]))
-
-    def _extraer_close(raw_df: pd.DataFrame, simbolo: str) -> pd.Series:
-        """Extrae la columna Close de un DataFrame de yfinance para un ticker dado."""
-        if isinstance(raw_df.columns, pd.MultiIndex):
-            lvl0 = raw_df.columns.get_level_values(0).unique().tolist()
-            lvl1 = raw_df.columns.get_level_values(1).unique().tolist()
-            if "Close" in lvl0:
-                # Estructura (campo, ticker): raw["Close"][ticker]
-                close = raw_df["Close"]
-                if isinstance(close, pd.DataFrame):
-                    if simbolo in close.columns:
-                        return close[simbolo]
-                    # a veces el ticker viene en minúsculas
-                    for c in close.columns:
-                        if str(c).upper() == simbolo.upper():
-                            return close[c]
-                return close.squeeze()
-            elif "Close" in lvl1:
-                # Estructura (ticker, campo): raw[ticker]["Close"]
-                if simbolo in lvl0:
-                    return raw_df[simbolo]["Close"]
-                for t in lvl0:
-                    if str(t).upper() == simbolo.upper():
-                        return raw_df[t]["Close"]
-        else:
-            if "Close" in raw_df.columns:
-                return raw_df["Close"]
-        return pd.Series(dtype=float)
-
-    # Estrategia 1: descarga masiva
-    try:
-        raw = yf.download(
-            todos,
-            start=str(fecha_inicio),
-            end=str(fecha_fin),
-            auto_adjust=True,
-            progress=False,
-            group_by="column",   # fuerza (campo, ticker) — la más predecible
-        )
-        series_dict = {}
-        for t in todos:
-            s = _extraer_close(raw, t)
-            s = pd.to_numeric(s, errors="coerce")
-            if not s.dropna().empty:
-                series_dict[t] = s
-    except Exception:
-        series_dict = {}
-
-    # Estrategia 2: descarga individual si la masiva falla o está vacía
-    if len(series_dict) < 2:
-        series_dict = {}
-        for t in todos:
-            try:
-                tmp = yf.download(t, start=str(fecha_inicio), end=str(fecha_fin),
-                                  auto_adjust=True, progress=False)
-                s = _extraer_close(tmp, t)
-                s = pd.to_numeric(s, errors="coerce").squeeze()
-                if not s.dropna().empty:
-                    series_dict[t] = s
-            except Exception:
-                pass
-
-    if not series_dict:
-        return pd.DataFrame()
-
-    # Combinar en un solo DataFrame alineado por fecha
-    precios = pd.DataFrame(series_dict)
-    precios.index.name = "Date"
-
-    # Aplanar MultiIndex residual en columnas
-    if isinstance(precios.columns, pd.MultiIndex):
-        precios.columns = [
-            str(c[0]).upper() if isinstance(c, tuple) else str(c).upper()
-            for c in precios.columns
-        ]
-
-    # Convertir todo a float y eliminar filas con cualquier NaN
-    precios = precios.apply(pd.to_numeric, errors="coerce").dropna()
-
-    return precios
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FUNCIÓN: rendimientos logarítmicos diarios
-# ─────────────────────────────────────────────────────────────────────────────
-def calcular_rendimientos(precios: pd.DataFrame) -> pd.DataFrame:
-    """
-    Rendimientos diarios logarítmicos: r_t = ln(P_t / P_{t-1}).
-    Elimina la primera fila (NaN) con dropna().
-    """
-    return np.log(precios / precios.shift(1)).dropna()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FUNCIÓN: métricas anualizadas
-# ─────────────────────────────────────────────────────────────────────────────
-def metricas_anuales(rendimientos: pd.DataFrame, rf_diaria: float) -> pd.DataFrame:
-    """
-    Rendimiento EA, Volatilidad EA y Sharpe Ratio anualizados para cada activo.
-    Devuelve un DataFrame de strings formateados para mostrar directo en pantalla.
-    """
-    media   = rendimientos.mean()
-    vol_d   = rendimientos.std()
-    rend_ea = np.exp(media * DIAS_ANIO) - 1
-    vol_ea  = vol_d * np.sqrt(DIAS_ANIO)
-    sharpe  = (rend_ea - rf_diaria * DIAS_ANIO) / vol_ea.replace(0, np.nan)
-
-    # Construimos tabla de strings directamente (evita el TypeError de pandas ≥2)
-    filas = {}
-    for col in rendimientos.columns:
-        filas[col] = {
-            "Rendimiento EA": "{:.2%}".format(rend_ea[col]),
-            "Volatilidad EA": "{:.2%}".format(vol_ea[col]),
-            "Sharpe Ratio":   "{:.4f}".format(sharpe[col]),
-        }
-    return pd.DataFrame(filas).T
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FUNCIÓN: índice base 100
-# ─────────────────────────────────────────────────────────────────────────────
-def base_100(precios: pd.DataFrame, base: float = 100.0) -> pd.DataFrame:
-    """
-    Normaliza todos los precios al mismo punto de partida (base = 100).
-    Fórmula: idx_t = (P_t / P_0) * base
-    """
-    if precios.empty or len(precios) == 0:
-        return precios
-    primer_valor = precios.iloc[0].replace(0, np.nan)
-    return (precios / primer_valor) * base
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FUNCIÓN: métricas de riesgo (Beta, VaR, CVaR)
-# ─────────────────────────────────────────────────────────────────────────────
-def metricas_riesgo(rendimientos: pd.DataFrame, benchmark: str,
-                    nivel: float = 0.05) -> pd.DataFrame:
-    """
-    Beta, VaR 95% y CVaR 95% para cada activo vs. benchmark.
-    Maneja NaN y series vacías con valores seguros.
-    """
-    if benchmark not in rendimientos.columns:
-        return pd.DataFrame()
-
-    activos = [c for c in rendimientos.columns if c != benchmark]
-    r_bmk   = rendimientos[benchmark].dropna().values
-
-    resultados = {}
-    for ticker in activos:
-        r = rendimientos[ticker].dropna().values
-
-        # Alinear longitudes para el cálculo de covarianza
-        n = min(len(r), len(r_bmk))
-        if n < 5:
-            resultados[ticker] = {"Beta": "N/D", "VaR 95% (1d)": "N/D", "CVaR 95% (1d)": "N/D"}
-            continue
-
-        r_a = r[-n:]
-        r_b = r_bmk[-n:]
-
-        # Beta = Cov(a, b) / Var(b)
-        cov_mat = np.cov(r_a, r_b)
-        var_b   = cov_mat[1, 1]
-        beta    = cov_mat[0, 1] / var_b if var_b > 0 else np.nan
-
-        # VaR histórico al nivel de confianza dado
-        var_hist = float(np.nanpercentile(r_a, nivel * 100))
-
-        # CVaR: media de los valores por debajo del VaR
-        cola = r_a[r_a <= var_hist]
-        cvar = float(np.mean(cola)) if len(cola) > 0 else var_hist
-
-        resultados[ticker] = {
-            "Beta":           f"{beta:.4f}" if not np.isnan(beta) else "N/D",
-            "VaR 95% (1d)":   f"{var_hist*100:.2f}%",
-            "CVaR 95% (1d)":  f"{cvar*100:.2f}%",
-        }
-
-    return pd.DataFrame(resultados).T
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FUNCIONES DE OPTIMIZACIÓN
-# ─────────────────────────────────────────────────────────────────────────────
-def portafolio_markowitz(rendimientos: pd.DataFrame, rf: float) -> dict:
-    """Portafolio de mínima varianza (Markowitz)."""
-    n      = rendimientos.shape[1]
-    medias = rendimientos.mean() * DIAS_ANIO
-    cov    = rendimientos.cov() * DIAS_ANIO
-
-    def varianza(w):
-        return float(w @ cov.values @ w)
-
-    res = minimize(varianza, np.ones(n) / n, method="SLSQP",
-                   bounds=[(0, 1)] * n,
-                   constraints=[{"type": "eq", "fun": lambda w: np.sum(w) - 1}],
-                   options={"ftol": 1e-9, "maxiter": 1000})
-
-    w   = res.x
-    r   = float(w @ medias.values)
-    v   = float(np.sqrt(w @ cov.values @ w))
-    sr  = (r - rf) / v if v > 0 else 0.0
-    return {"pesos": w, "rendimiento": r, "volatilidad": v, "sharpe": sr}
-
-
-def portafolio_maximo_sharpe(rendimientos: pd.DataFrame, rf: float) -> dict:
-    """Portafolio de máximo Sharpe Ratio (tangencia)."""
-    n      = rendimientos.shape[1]
-    medias = rendimientos.mean() * DIAS_ANIO
-    cov    = rendimientos.cov() * DIAS_ANIO
-
-    def neg_sharpe(w):
-        r = float(w @ medias.values)
-        v = float(np.sqrt(w @ cov.values @ w))
-        return -(r - rf) / (v + 1e-12)
-
-    res = minimize(neg_sharpe, np.ones(n) / n, method="SLSQP",
-                   bounds=[(0, 1)] * n,
-                   constraints=[{"type": "eq", "fun": lambda w: np.sum(w) - 1}],
-                   options={"ftol": 1e-9, "maxiter": 1000})
-
-    w  = res.x
-    r  = float(w @ medias.values)
-    v  = float(np.sqrt(w @ cov.values @ w))
-    sr = (r - rf) / v if v > 0 else 0.0
-    return {"pesos": w, "rendimiento": r, "volatilidad": v, "sharpe": sr}
-
-
-def portafolio_montecarlo(rendimientos: pd.DataFrame, rf: float, n_sim: int = 5000) -> dict:
-    """Mejor portafolio entre n_sim aleatorios (máximo Sharpe)."""
-    n      = rendimientos.shape[1]
-    medias = rendimientos.mean() * DIAS_ANIO
-    cov    = rendimientos.cov() * DIAS_ANIO
-
-    mejor_sr = -np.inf
-    mejor_w  = np.ones(n) / n
-
-    for _ in range(n_sim):
-        w  = np.random.dirichlet(np.ones(n))
-        r  = float(w @ medias.values)
-        v  = float(np.sqrt(w @ cov.values @ w))
-        sr = (r - rf) / (v + 1e-12)
-        if sr > mejor_sr:
-            mejor_sr = sr
-            mejor_w  = w
-
-    r = float(mejor_w @ medias.values)
-    v = float(np.sqrt(mejor_w @ cov.values @ mejor_w))
-    return {"pesos": mejor_w, "rendimiento": r, "volatilidad": v, "sharpe": mejor_sr}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FUNCIÓN: simulación Monte Carlo de precio futuro
-# ─────────────────────────────────────────────────────────────────────────────
-def montecarlo_precio(rend_serie: pd.Series, precio_actual: float,
-                      n_sim: int = 1000, horizonte: int = 252) -> pd.DataFrame:
-    """
-    Simula n_sim trayectorias de precio usando movimiento browniano geométrico.
-    GBM: S_{t+1} = S_t * exp((mu - 0.5*sigma²) + sigma*Z), Z ~ N(0,1)
-    """
-    r = rend_serie.dropna()
-    mu    = float(r.mean())
-    sigma = float(r.std())
-    Z     = np.random.standard_normal((horizonte, n_sim))
-    tray  = precio_actual * np.exp(np.cumsum((mu - 0.5 * sigma**2) + sigma * Z, axis=0))
-    return pd.DataFrame(tray)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FUNCIÓN: indicadores técnicos
-# ─────────────────────────────────────────────────────────────────────────────
-def calcular_indicadores_tecnicos(precios: pd.Series) -> pd.DataFrame:
-    """MA5/10/20/200, RSI(14), MACD(12-26-9)."""
-    s  = precios.dropna()
-    df = pd.DataFrame({"Precio": s})
-
-    for p in [5, 10, 20, 200]:
-        df[f"MA{p}"] = df["Precio"].rolling(p).mean()
-
-    delta = df["Precio"].diff()
-    g = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
-    p = (-delta).clip(lower=0).ewm(span=14, adjust=False).mean()
-    df["RSI"] = 100 - (100 / (1 + g / (p + 1e-12)))
-
-    ema12         = df["Precio"].ewm(span=12, adjust=False).mean()
-    ema26         = df["Precio"].ewm(span=26, adjust=False).mean()
-    df["MACD"]    = ema12 - ema26
-    df["Signal"]  = df["MACD"].ewm(span=9, adjust=False).mean()
-    df["Hist"]    = df["MACD"] - df["Signal"]
-
-    return df
-
-
-def niveles_fibonacci(p_min: float, p_max: float) -> dict:
-    """Niveles de retroceso de Fibonacci (23.6%, 38.2%, 50%, 61.8%, 100%)."""
-    r = p_max - p_min
-    return {
-        "Fibo 0%":    p_min,
-        "Fibo 23.6%": p_min + 0.236 * r,
-        "Fibo 38.2%": p_min + 0.382 * r,
-        "Fibo 50%":   p_min + 0.500 * r,
-        "Fibo 61.8%": p_min + 0.618 * r,
-        "Fibo 100%":  p_max,
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FUNCIÓN: valoración estadística
-# ─────────────────────────────────────────────────────────────────────────────
-def valoracion_estadistica(precios_ticker: pd.Series, precios_bmk: pd.Series,
-                            anios_reg: float = 1.0) -> dict:
-    """
-    Regresión OLS: ln(ticker) ~ alfa + beta*ln(benchmark)
-    + percentiles históricos del precio.
-    """
-    df = pd.DataFrame({"ticker": precios_ticker, "bmk": precios_bmk}).dropna()
-    if len(df) < 20:
-        return None
-
-    df_reg     = df.tail(int(anios_reg * DIAS_ANIO))
-    ln_t       = np.log(df_reg["ticker"])
-    ln_b       = np.log(df_reg["bmk"])
-    X          = sm.add_constant(ln_b)
-    modelo     = sm.OLS(ln_t, X).fit()
-    alfa, beta = float(modelo.params.iloc[0]), float(modelo.params.iloc[1])
-    r2         = float(modelo.rsquared)
-
-    ln_bmk_act  = np.log(float(df["bmk"].iloc[-1]))
-    precio_obj  = float(np.exp(alfa + beta * ln_bmk_act))
-    precio_act  = float(df["ticker"].iloc[-1])
-    potencial   = precio_obj / precio_act - 1
-
-    vals = df["ticker"].dropna().values
-    percentiles = {p: float(np.nanpercentile(vals, p * 100))
-                   for p in [0, 0.01, 0.05, 0.25, 0.50, 0.75, 0.95, 0.99, 1.0]}
-    pct_actual  = float(stats.percentileofscore(vals, precio_act)) / 100
-
-    return {
-        "alfa": alfa, "beta": beta, "r2": r2,
-        "precio_obj_reg": precio_obj, "potencial_reg": potencial,
-        "percentiles": percentiles, "percentil_actual": pct_actual,
-        "precio_actual": precio_act, "confiable": r2 > 0.5,
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FUNCIÓN: señal técnica
-# ─────────────────────────────────────────────────────────────────────────────
-def senal_tecnica(ind: pd.DataFrame) -> dict:
-    """Score técnico entre -1 (bajista) y +1 (alcista)."""
-    ult = ind.iloc[-1]
-
-    # Medias móviles: Golden/Death Cross MA20 vs MA200
-    ma20  = ult["MA20"]
-    ma200 = ult["MA200"]
-    if pd.isna(ma200):
-        s_ma = 0.0
-    else:
-        s_ma = 1.0 if ma20 > ma200 else -1.0
-
-    # RSI
-    rsi = ult["RSI"]
-    s_rsi = -1.0 if rsi > 70 else (1.0 if rsi < 30 else 0.0)
-
-    # MACD
-    s_macd = 1.0 if ult["MACD"] > ult["Signal"] else -1.0
-
-    # Fibonacci
-    p_min = float(ind["Precio"].min())
-    p_max = float(ind["Precio"].max())
-    fibo  = niveles_fibonacci(p_min, p_max)
-    s_fib = 1.0 if ult["Precio"] < fibo["Fibo 50%"] else -1.0
-
-    score = (1/6)*s_ma + (1/6)*s_rsi + (1/6)*s_macd + (1/2)*s_fib
-
-    return {
-        "señales": {
-            "Medias Móviles": s_ma,
-            "RSI":            s_rsi,
-            "MACD":           s_macd,
-            "Fibonacci":      s_fib,
-        },
-        "score_tecnico": score,
-        "rsi_valor":     rsi,
-        "fibo_niveles":  fibo,
-        "precio_actual": float(ult["Precio"]),
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FUNCIÓN: valoración fundamental
-# ─────────────────────────────────────────────────────────────────────────────
-def valoracion_fundamental_basica(ticker: str) -> dict:
-    """Descarga métricas fundamentales vía yfinance.info."""
-    try:
-        info = yf.Ticker(ticker).info
-    except Exception:
-        info = {}
-    return {
-        "nombre":    info.get("longName",              ticker),
-        "sector":    info.get("sector",                "N/D"),
-        "precio":    info.get("currentPrice",          np.nan),
-        "P/E":       info.get("trailingPE",            np.nan),
-        "P/B":       info.get("priceToBook",           np.nan),
-        "EV/EBITDA": info.get("enterpriseToEbitda",    np.nan),
-        "ROE":       info.get("returnOnEquity",        np.nan),
-        "Yield":     info.get("dividendYield",         np.nan),
-        "Beta":      info.get("beta",                  np.nan),
-        "MktCap":    info.get("marketCap",             np.nan),
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FUNCIÓN: recomendación final ponderada
-# ─────────────────────────────────────────────────────────────────────────────
-def recomendacion_final(s_tec, s_est, s_fund, p_tec, p_est, p_fund) -> dict:
-    """
-    Score ponderado: > 0.2 → COMPRA | -0.2 a 0.2 → MANTENER | < -0.2 → VENTA
-    Replica la hoja 'Resumen Ponderación' del modelo Excel.
-    """
-    total = p_tec + p_est + p_fund
-    if total <= 0:
-        total = 1.0
-    score = (s_tec * p_tec + s_est * p_est + s_fund * p_fund) / total
-
-    if score > 0.2:
-        rec, color = "🟢 COMPRA",   "green"
-        desc = "La acción parece infravalorada respecto a los criterios analizados."
-    elif score < -0.2:
-        rec, color = "🔴 VENTA",    "red"
-        desc = "La acción parece sobrevalorada respecto a los criterios analizados."
-    else:
-        rec, color = "🟡 MANTENER", "orange"
-        desc = "La acción cotiza cerca de su valor justo estimado."
-
-    return {
-        "score": round(score, 4), "recomendacion": rec,
-        "color": color, "descripcion": desc,
-        "score_tec": round(s_tec, 4),
-        "score_est": round(s_est, 4),
-        "score_fund": round(s_fund, 4),
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FUNCIÓN: tabla comparativa de portafolios
-# ─────────────────────────────────────────────────────────────────────────────
-def tabla_comparacion_portafolios(tickers, mk, ms, mc) -> pd.DataFrame:
-    rows = []
-    for i, t in enumerate(tickers):
-        rows.append({
-            "Ticker":           t,
-            "Peso Markowitz":   f"{mk['pesos'][i]*100:.1f}%",
-            "Peso CAPM/Sharpe": f"{ms['pesos'][i]*100:.1f}%",
-            "Peso Montecarlo":  f"{mc['pesos'][i]*100:.1f}%",
-        })
-    for label, key in [("Rendimiento EA", "rendimiento"),
-                       ("Volatilidad EA",  "volatilidad"),
-                       ("Sharpe Ratio",    "sharpe")]:
-        fmt = (lambda v: f"{v*100:.2f}%") if key != "sharpe" else (lambda v: f"{v:.4f}")
-        rows.append({
-            "Ticker":           label,
-            "Peso Markowitz":   fmt(mk[key]),
-            "Peso CAPM/Sharpe": fmt(ms[key]),
-            "Peso Montecarlo":  fmt(mc[key]),
-        })
-    return pd.DataFrame(rows)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  PANTALLA DE BIENVENIDA
-# ═════════════════════════════════════════════════════════════════════════════
-if not btn_analizar:
+if not st.session_state.analizar:
     st.markdown("## 📈 Analizador de Portafolios & Valoración")
     st.markdown("""
 **Bienvenido.** Esta herramienta permite:
 
-- 📊 **Análisis de portafolio**: precios en base 100, correlaciones, rendimientos históricos
-- ⚙️ **Optimización**: Markowitz (mín varianza), máx Sharpe (CAPM) y Monte Carlo
-- 🎲 **Simulación Monte Carlo** de precios futuros (1000 trayectorias)
-- 📉 **Valoración técnica**: Medias móviles, RSI, MACD, Fibonacci
-- 📐 **Valoración estadística**: Regresión lineal y percentiles históricos
-- 🏦 **Valoración fundamental**: Múltiplos de mercado y DCF (entrada manual)
-- ✅ **Recomendación final** ponderada por el usuario (Comprar / Mantener / Vender)
+- 📊 **Análisis de portafolio**
+- ⚙️ **Optimización**
+- 🎲 **Simulación Monte Carlo**
+- 📉 **Valoración técnica**
+- 📐 **Valoración estadística**
+- 🏦 **Valoración fundamental**
+- ✅ **Recomendación final**
 
-👈 **Ingresa los tickers en el panel izquierdo y haz clic en "Analizar Portafolio".**
-
----
-*Desarrollado por **Diego CR** · Los resultados son meramente informativos y no constituyen asesoría financiera.*
+👈 Ingresa los tickers y haz clic en **Analizar Portafolio**.
 """)
     st.stop()
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNCIÓN: TRM Colombia (datos.gov.co)
+# ─────────────────────────────────────────────────────────────────────────────
+def obtener_trm_colombia():
+    try:
+        url = "https://www.datos.gov.co/resource/32sa-8pi3.json?$limit=1&$order=vigenciadesde DESC"
+        r = requests.get(url, timeout=5)
+        data = r.json()
+        return float(data[0]["valor"])
+    except:
+        return np.nan
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNCIÓN: Clasificación de tickers (ETF / Acción / Región / Emisor)
+# ─────────────────────────────────────────────────────────────────────────────
+def clasificar_ticker(ticker):
+    try:
+        info = yf.Ticker(ticker).info
+    except:
+        info = {}
+
+    qt = str(info.get("quoteType", "")).upper()
+    fund = info.get("fundFamily")
+    region = info.get("region", "N/D")
+    name = info.get("longName", ticker)
+
+    if qt == "ETF" or fund:
+        tipo = "ETF"
+        emisor = fund or "N/D"
+    elif qt == "EQUITY":
+        tipo = "Acción"
+        emisor = name
+    else:
+        tipo = qt or "Otro"
+        emisor = name
+
+    return {"Ticker": ticker, "Tipo": tipo, "Región": region, "Emisor": emisor}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNCIÓN: Tipo de activo (para valoración fundamental)
+# ─────────────────────────────────────────────────────────────────────────────
+def tipo_activo_desde_info(info):
+    qt = str(info.get("quoteType", "")).upper()
+    if qt == "ETF" or info.get("fundFamily"):
+        return "ETF"
+    elif qt == "EQUITY":
+        return "Acción"
+    return qt or "Otro"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNCIÓN: Valoración fundamental para ETF
+# ─────────────────────────────────────────────────────────────────────────────
+def valoracion_fundamental_etf(ticker):
+    try:
+        info = yf.Ticker(ticker).info
+    except:
+        info = {}
+
+    return {
+        "nombre": info.get("longName", ticker),
+        "emisor": info.get("fundFamily", "N/D"),
+        "precio": info.get("currentPrice", np.nan),
+        "AUM": info.get("totalAssets", np.nan),
+        "Expense Ratio": info.get("expenseRatio", np.nan),
+        "Beta": info.get("beta", np.nan),
+        "Categoria": info.get("category", "N/D"),
+        "Region": info.get("region", "N/D"),
+    }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNCIÓN: Wrapper general (ETF vs Acción)
+# ─────────────────────────────────────────────────────────────────────────────
+def valoracion_fundamental_general(ticker):
+    try:
+        info = yf.Ticker(ticker).info
+    except:
+        info = {}
+
+    tipo = tipo_activo_desde_info(info)
+
+    if tipo == "ETF":
+        return valoracion_fundamental_etf(ticker)
+    return valoracion_fundamental_basica(ticker)
 # ═════════════════════════════════════════════════════════════════════════════
 #  PROCESAMIENTO PRINCIPAL
 # ═════════════════════════════════════════════════════════════════════════════
@@ -652,21 +250,48 @@ st.success(
 )
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  TABS
+#  NUEVO TAB 0: 🌍 MACRO & RESUMEN
 # ═════════════════════════════════════════════════════════════════════════════
+
 tabs = st.tabs([
+    "🌍 Macro & Resumen",
     "📊 Análisis de Portafolio",
     "⚙️ Optimización",
     "🎲 Monte Carlo",
     "🔍 Valoración Ticker",
 ])
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB 1: ANÁLISIS DE PORTAFOLIO
-# ─────────────────────────────────────────────────────────────────────────────
 with tabs[0]:
-    st.header("Análisis del Portafolio")
+    st.header("🌍 Indicadores Macroeconómicos & Resumen de Tickers")
+
+    col1, col2 = st.columns(2)
+
+    # --- TRM Colombia ---
+    with col1:
+        st.subheader("💱 TRM COP/USD")
+        trm = obtener_trm_colombia()
+        if np.isnan(trm):
+            st.warning("No se pudo obtener la TRM actual.")
+        else:
+            st.metric("TRM Hoy (COP/USD)", f"{trm:,.2f}")
+
+        st.caption("Fuente: datos.gov.co (Banco de la República)")
+
+    # --- Resumen de tickers ---
+    with col2:
+        st.subheader("📋 Clasificación de Tickers")
+        resumen = [clasificar_ticker(t) for t in tickers_raw]
+        df_resumen = pd.DataFrame(resumen)
+        st.dataframe(df_resumen, use_container_width=True)
+
+    st.info("Puedes extender este tab agregando inflación Colombia, inflación USA, tasas FED/BanRep, VIX, etc.")
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  TAB 1: ANÁLISIS DE PORTAFOLIO
+# ═════════════════════════════════════════════════════════════════════════════
+
+with tabs[1]:
+    st.header("📊 Análisis del Portafolio")
 
     # 1.1 Base 100
     st.subheader("Precios normalizados (Base 100)")
@@ -734,13 +359,11 @@ with tabs[0]:
         fig_vs.update_layout(title="Portafolio igual peso vs. Benchmark",
                              yaxis_tickformat=".0%", template="plotly_dark")
         st.plotly_chart(fig_vs, use_container_width=True)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 2: OPTIMIZACIÓN
 # ─────────────────────────────────────────────────────────────────────────────
-with tabs[1]:
-    st.header("Optimización de Portafolio")
+with tabs[2]:
+    st.header("⚙️ Optimización de Portafolio")
     st.info("Tres métodos: Markowitz (mín varianza), CAPM / Máx Sharpe, y Monte Carlo.")
 
     with st.spinner("Optimizando portafolios..."):
@@ -779,8 +402,8 @@ with tabs[1]:
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 3: MONTE CARLO
 # ─────────────────────────────────────────────────────────────────────────────
-with tabs[2]:
-    st.header("Simulación Monte Carlo de Precios (1 año)")
+with tabs[3]:
+    st.header("🎲 Simulación Monte Carlo de Precios (1 año)")
     st.caption("1 000 trayectorias usando movimiento browniano geométrico (GBM).")
 
     ticker_mc = st.selectbox("Selecciona el ticker a simular", options=tickers_ok, key="mc_sel")
@@ -833,10 +456,10 @@ with tabs[2]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 4: VALORACIÓN TICKER
+# TAB 4: VALORACIÓN TICKER (CON ETF/ACTION AUTOMÁTICO)
 # ─────────────────────────────────────────────────────────────────────────────
-with tabs[3]:
-    st.header("Valoración de Ticker Individual")
+with tabs[4]:
+    st.header("🔍 Valoración de Ticker Individual")
 
     ticker_val = st.selectbox("Selecciona el ticker a valorar", options=tickers_ok, key="val_sel")
 
@@ -958,128 +581,51 @@ with tabs[3]:
     else:
         st.warning("⚠️ Benchmark no disponible para valoración estadística.")
 
-    # ── ANÁLISIS FUNDAMENTAL ──────────────────────────────────────────────────
+    # ── ANÁLISIS FUNDAMENTAL (ETF vs ACCIÓN) ───────────────────────────────────
     st.subheader("🏦 3. Valoración Fundamental")
+
     with st.spinner("Descargando datos fundamentales..."):
-        fund = valoracion_fundamental_basica(ticker_val)
+        fund = valoracion_fundamental_general(ticker_val)
 
-    st.markdown(f"**{fund['nombre']}** | Sector: {fund['sector']}")
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Precio", f"${fund['precio']:.2f}"    if not pd.isna(fund['precio'])    else "N/D")
-    c2.metric("P/E",    f"{fund['P/E']:.1f}x"       if not pd.isna(fund['P/E'])       else "N/D")
-    c3.metric("P/B",    f"{fund['P/B']:.2f}x"       if not pd.isna(fund['P/B'])       else "N/D")
-    c4.metric("EV/EBITDA", f"{fund['EV/EBITDA']:.1f}x" if not pd.isna(fund['EV/EBITDA']) else "N/D")
-    c5.metric("ROE",    f"{fund['ROE']*100:.1f}%"   if not pd.isna(fund['ROE'])       else "N/D")
-
-    st.markdown("#### DCF – Flujo de Caja Libre Descontado")
-    st.caption("Ingresa los datos del último reporte para calcular el valor intrínseco.")
-
-    score_fundamental = 0.0
-
-    with st.expander("📋 Ingresar datos financieros para DCF (opcional)"):
-        c1, c2 = st.columns(2)
-        with c1:
-            uo         = st.number_input("Utilidad Operativa (EBIT) 12M",       value=0.0, format="%.0f")
-            dda        = st.number_input("Depreciación y Amortización 12M",     value=0.0, format="%.0f")
-            capex      = st.number_input("CAPEX 12M",                            value=0.0, format="%.0f")
-            delta_ktno = st.number_input("Variación KTNO",                      value=0.0, format="%.0f")
-            tasa_imp   = st.number_input("Tasa de impuestos (decimal)",          value=0.25, format="%.4f")
-        with c2:
-            rf_dcf   = st.number_input("Tasa libre de riesgo",      value=rf,   format="%.4f")
-            r_mdo    = st.number_input("Retorno esperado del mercado", value=0.12, format="%.4f")
-            beta_dcf = st.number_input("Beta del activo",
-                                       value=fund["Beta"] if not pd.isna(fund["Beta"]) else 1.0,
-                                       format="%.4f")
-            kd       = st.number_input("Costo de la deuda kd (decimal)",        value=0.05, format="%.4f")
-            w_equity = st.number_input("Peso del equity (decimal)",              value=0.80, format="%.4f")
-            acciones = st.number_input("Acciones en circulación",                value=1e9,  format="%.0f")
-        calcular_dcf = st.button("Calcular Valor Intrínseco (DCF)")
-
-    if calcular_dcf and uo > 0:
-        ke   = rf_dcf + beta_dcf * (r_mdo - rf_dcf)
-        kd_d = kd * (1 - tasa_imp)
-        wacc = ke * w_equity + kd_d * (1 - w_equity)
-
-        uodi = uo * (1 - tasa_imp)
-        fcf  = uodi + dda - delta_ktno - capex
-
-        g_crec = 0.07
-        g_term = 0.025
-        flujos   = [fcf * (1 + g_crec)**t for t in range(1, 6)]
-        vp_flujos = sum(f / (1 + wacc)**t for t, f in enumerate(flujos, 1))
-        val_term  = flujos[-1] * (1 + g_term) / (wacc - g_term) if wacc > g_term else 0
-        vp_term   = val_term / (1 + wacc)**5
-        equity_val = vp_flujos + vp_term
-        po_dcf     = equity_val / acciones if acciones > 0 else 0
-
-        precio_mdo   = fund.get("precio") or 0
-        potencial_dcf = (po_dcf / precio_mdo - 1) if precio_mdo > 0 else 0
-
+    # Mostrar métricas según tipo
+    if "AUM" in fund:   # Es ETF
+        st.markdown(f"**{fund['nombre']}** | Emisor: {fund['emisor']}")
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("WACC",         f"{wacc*100:.2f}%")
-        c2.metric("FCF calculado", f"${fcf:,.0f}")
-        c3.metric("PO por DCF",    f"${po_dcf:.2f}")
-        c4.metric("Potencial",     f"{potencial_dcf*100:+.1f}%")
+        c1.metric("Precio", f"${fund['precio']:.2f}" if not pd.isna(fund['precio']) else "N/D")
+        c2.metric("AUM", f"${fund['AUM']:,}" if not pd.isna(fund['AUM']) else "N/D")
+        c3.metric("Expense Ratio", f"{fund['Expense Ratio']*100:.2f}%" if not pd.isna(fund['Expense Ratio']) else "N/D")
+        c4.metric("Beta", f"{fund['Beta']:.2f}" if not pd.isna(fund['Beta']) else "N/D")
 
-        score_fundamental = float(np.clip(potencial_dcf * 2, -1, 1))
-        st.write(f"**Score fundamental (DCF):** {score_fundamental:.4f}")
+        score_fundamental = 0.0
+        if not pd.isna(fund["Expense Ratio"]):
+            score_fundamental += (0.5 if fund["Expense Ratio"] < 0.003 else -0.5)
+
+        st.info("ETF detectado: se omite DCF y múltiplos de empresa.")
     else:
-        pe = fund.get("P/E")
-        if pe and not pd.isna(pe):
-            score_fundamental = 0.5 if pe < 15 else (-0.5 if pe > 30 else 0.0)
-        st.info(f"ℹ️ Sin datos DCF. Score aproximado por P/E: {score_fundamental:.2f}")
+        # Acción → usar tu lógica original
+        st.markdown(f"**{fund['nombre']}** | Sector: {fund['sector']}")
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Precio", f"${fund['precio']:.2f}"    if not pd.isna(fund['precio'])    else "N/D")
+        c2.metric("P/E",    f"{fund['P/E']:.1f}x"       if not pd.isna(fund['P/E'])       else "N/D")
+        c3.metric("P/B",    f"{fund['P/B']:.2f}x"       if not pd.isna(fund['P/B'])       else "N/D")
+        c4.metric("EV/EBITDA", f"{fund['EV/EBITDA']:.1f}x" if not pd.isna(fund['EV/EBITDA']) else "N/D")
+        c5.metric("ROE",    f"{fund['ROE']*100:.1f}%"   if not pd.isna(fund['ROE'])       else "N/D")
 
-    # ── RECOMENDACIÓN FINAL ───────────────────────────────────────────────────
-    st.subheader("✅ Recomendación Final Ponderada")
-    rec = recomendacion_final(
-        score_tecnico, score_estadistico, score_fundamental,
-        peso_tec, peso_est, peso_fund,
-    )
+        st.markdown("#### DCF – Flujo de Caja Libre Descontado")
+        st.caption("Ingresa los datos del último reporte para calcular el valor intrínseco.")
 
-    st.markdown(f"""
-| Tipo de Análisis     | Score       | Peso   | Ponderado |
-|----------------------|-------------|--------|-----------|
-| Análisis Técnico     | {rec['score_tec']:+.4f} | {peso_tec*100:.0f}% | {rec['score_tec']*peso_tec/max(suma_pesos,0.01):+.4f} |
-| Análisis Estadístico | {rec['score_est']:+.4f} | {peso_est*100:.0f}% | {rec['score_est']*peso_est/max(suma_pesos,0.01):+.4f} |
-| Análisis Fundamental | {rec['score_fund']:+.4f} | {peso_fund*100:.0f}% | {rec['score_fund']*peso_fund/max(suma_pesos,0.01):+.4f} |
-| **SCORE FINAL**      | **{rec['score']:+.4f}** | 100% | |
-""")
+        score_fundamental = 0.0
 
-    color_bg = {"green": "#1a4d1a", "red": "#4d1a1a", "orange": "#4d3a00"}
-    st.markdown(
-        f"""
-        <div style='background-color:{color_bg[rec["color"]]};
-                    border-left:6px solid {rec["color"]};
-                    padding:20px; border-radius:8px; margin-top:10px;'>
-            <h2 style='color:{rec["color"]}; margin:0;'>{rec["recomendacion"]}</h2>
-            <p style='color:#ddd; margin:8px 0 0 0;'>{rec["descripcion"]}</p>
-            <p style='color:#aaa; font-size:0.85rem; margin:4px 0 0 0;'>
-                Score final: <strong>{rec['score']:+.4f}</strong> &nbsp;|&nbsp;
-                <span style='color:green'>COMPRA &gt; 0.2</span> &nbsp;|&nbsp;
-                <span style='color:orange'>MANTENER ±0.2</span> &nbsp;|&nbsp;
-                <span style='color:red'>VENTA &lt; -0.2</span>
-            </p>
-            <p style='color:#666; font-size:0.75rem; margin:8px 0 0 0;'>
-                ⚠️ Resultado meramente informativo. No constituye asesoría financiera.
-                Desarrollado por Diego CR.
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PIE DE PÁGINA
-# ─────────────────────────────────────────────────────────────────────────────
-st.divider()
-st.markdown(
-    """
-    <div style='text-align:center; color:#555; font-size:0.8rem;'>
-        Analizador de Portafolios & Valoración · Desarrollado por <strong>Diego CR</strong><br>
-        Resultados meramente informativos · No constituyen asesoría de inversión ·
-        Datos: Yahoo Finance vía <code>yfinance</code>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+        with st.expander("📋 Ingresar datos financieros para DCF (opcional)"):
+            c1, c2 = st.columns(2)
+            with c1:
+                uo         = st.number_input("Utilidad Operativa (EBIT) 12M",       value=0.0, format="%.0f")
+                dda        = st.number_input("Depreciación y Amortización 12M",     value=0.0, format="%.0f")
+                capex      = st.number_input("CAPEX 12M",                            value=0.0, format="%.0f")
+                delta_ktno = st.number_input("Variación KTNO",                      value=0.0, format="%.0f")
+                tasa_imp   = st.number_input("Tasa de impuestos (decimal)",          value=0.25, format="%.4f")
+            with c2:
+                rf_dcf   = st.number_input("Tasa libre de riesgo",      value=rf,   format="%.4f")
+                r_mdo    = st.number_input("Retorno esperado del mercado", value=0.12, format="%.4f")
+                beta_dcf = st.number_input("Beta del activo",
+                                           value=fund["Beta"] if not pd.isna(fund["Beta"]) else 1.

@@ -72,7 +72,7 @@ with st.sidebar:
     # Campo de texto para múltiples tickers del portafolio, separados por coma
     tickers_input = st.text_area(
         "Tickers del portafolio (separados por coma)",
-        value="SPY, QQQ, IWM, EFA, EEM",
+        value="QQQ, IWM, EFA, EEM",
         help="Ejemplo: AAPL, MSFT, AMZN, GOOGL"
     )
 
@@ -127,27 +127,75 @@ def descargar_precios(tickers: list, benchmark: str, anios: int) -> pd.DataFrame
     DataFrame con columnas = tickers + benchmark, índice = fecha,
     sin filas con NaN (filas donde algún ticker no tenga precio).
     """
-    fecha_fin   = datetime.date.today()
+    fecha_fin    = datetime.date.today()
     fecha_inicio = fecha_fin - datetime.timedelta(days=int(anios * 365.25))
 
     # Descarga masiva de todos los tickers en una sola llamada a yfinance
-    todos = list(set(tickers + [benchmark]))
-    raw   = yf.download(
+    todos = list(dict.fromkeys(tickers + [benchmark]))   # preserva orden, sin duplicados
+
+    raw = yf.download(
         todos,
         start=str(fecha_inicio),
         end=str(fecha_fin),
-        auto_adjust=True,   # Precios ya ajustados por dividendos y splits
+        auto_adjust=True,    # Precios ya ajustados por dividendos y splits
         progress=False,
+        group_by="ticker",   # yfinance >=0.2: agrupa por ticker para tener MultiIndex claro
     )
 
-    # Si se descargó un solo ticker, yfinance devuelve estructura plana; normalizamos
-    if isinstance(raw.columns, pd.MultiIndex):
-        precios = raw["Close"]
-    else:
-        precios = raw[["Close"]].rename(columns={"Close": todos[0]})
+    # ── Normalización del resultado de yfinance ───────────────────────────────
+    # yfinance puede devolver distintas estructuras según versión y número de tickers:
+    #   - MultiIndex (ticker, campo): cuando hay >1 ticker con group_by="ticker"
+    #   - MultiIndex (campo, ticker): cuando hay >1 ticker sin group_by
+    #   - Plano: cuando hay exactamente 1 ticker
 
-    # Eliminamos las filas donde algún ticker NO tenga precio,
-    # para no contaminar la estadística de los demás (criterio del Excel AP_Data)
+    if isinstance(raw.columns, pd.MultiIndex):
+        # Intentamos extraer nivel "Close" de cualquiera de los dos posibles ordenamientos
+        nivel_0 = raw.columns.get_level_values(0).unique().tolist()
+        nivel_1 = raw.columns.get_level_values(1).unique().tolist()
+
+        if "Close" in nivel_0:
+            # Estructura (campo, ticker) → raw["Close"] da columnas = tickers
+            precios = raw["Close"].copy()
+        elif "Close" in nivel_1:
+            # Estructura (ticker, campo) → necesitamos re-ordenar
+            precios = raw.xs("Close", axis=1, level=1).copy()
+        else:
+            # Fallback: descarga individual ticker por ticker
+            dfs = {}
+            for t in todos:
+                try:
+                    tmp = yf.download(t, start=str(fecha_inicio), end=str(fecha_fin),
+                                      auto_adjust=True, progress=False)
+                    if not tmp.empty:
+                        # En versiones recientes el resultado puede ser MultiIndex incluso para 1 ticker
+                        if isinstance(tmp.columns, pd.MultiIndex):
+                            dfs[t] = tmp["Close"].squeeze()
+                        else:
+                            dfs[t] = tmp["Close"]
+                except Exception:
+                    pass
+            precios = pd.DataFrame(dfs)
+    else:
+        # Un solo ticker: columnas planas
+        if "Close" in raw.columns:
+            precios = raw[["Close"]].rename(columns={"Close": todos[0]})
+        else:
+            precios = raw.iloc[:, :1].copy()
+            precios.columns = [todos[0]]
+
+    # Aseguramos que el índice se llame "Date" para consistencia con los gráficos
+    precios.index.name = "Date"
+
+    # Aplanamos columnas por si quedó algún nivel residual
+    if isinstance(precios.columns, pd.MultiIndex):
+        precios.columns = [str(c[0]) if isinstance(c, tuple) else str(c)
+                           for c in precios.columns]
+
+    # Convertimos a numérico (por si hubo strings o tipos mixtos)
+    precios = precios.apply(pd.to_numeric, errors="coerce")
+
+    # Eliminamos filas donde ALGÚN ticker no tenga precio
+    # (criterio del Excel AP_Data: "eliminar filas donde algún ticker no tenga precio")
     precios = precios.dropna()
 
     return precios
@@ -200,8 +248,14 @@ def base_1000(precios: pd.DataFrame, base: float = 1000.0) -> pd.DataFrame:
     Normaliza todos los precios al mismo punto de partida (base).
     Fórmula: idx_t = (P_t / P_0) * base
     Permite comparar visualmente activos de distintas magnitudes de precio.
+
+    Robustez: si el DataFrame viene vacío o la primera fila tiene ceros/NaN,
+    devuelve el DataFrame tal cual para evitar IndexError / ZeroDivisionError.
     """
-    return (precios / precios.iloc[0]) * base
+    if precios.empty or len(precios) == 0:
+        return precios
+    primer_valor = precios.iloc[0].replace(0, np.nan)   # Evita división por cero
+    return (precios / primer_valor) * base
 
 
 # ─────────────────────────────────────────────────────────────────────────────

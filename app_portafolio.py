@@ -1,4 +1,3 @@
-
 """
 ================================================================================
   ANALIZADOR DE PORTAFOLIOS & VALORACIÓN DE ACTIVOS
@@ -31,6 +30,7 @@ from plotly.subplots import make_subplots
 
 # ── Interfaz Streamlit ───────────────────────────────────────────────────────
 import streamlit as st
+import io
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURACIÓN GENERAL DE LA PÁGINA
@@ -170,6 +170,192 @@ def tipo_activo_desde_info(info):
 # ─────────────────────────────────────────────────────────────────────────────
 # FUNCIÓN: Valoración fundamental ETF
 # ─────────────────────────────────────────────────────────────────────────────
+def valoracion_fundamental_etf(ticker):
+    try:
+        info = yf.Ticker(ticker).info
+    except:
+        info = {}
+
+    return {
+        "nombre": info.get("longName", ticker),
+        "emisor": info.get("fundFamily", "N/D"),
+        "precio": info.get("currentPrice", np.nan),
+        "AUM": info.get("totalAssets", np.nan),
+        "Expense Ratio": info.get("expenseRatio", np.nan),
+        "Beta": info.get("beta", np.nan),
+        "Categoria": info.get("category", "N/D"),
+        "Region": info.get("region", "N/D"),
+    }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNCIÓN: Valoración fundamental básica (Acciones)
+# ─────────────────────────────────────────────────────────────────────────────
+def valoracion_fundamental_basica(ticker):
+    try:
+        info = yf.Ticker(ticker).info
+    except:
+        info = {}
+
+    return {
+        "nombre":    info.get("longName", ticker),
+        "sector":    info.get("sector", "N/D"),
+        "precio":    info.get("currentPrice", np.nan),
+        "P/E":       info.get("trailingPE", np.nan),
+        "P/B":       info.get("priceToBook", np.nan),
+        "EV/EBITDA": info.get("enterpriseToEbitda", np.nan),
+        "ROE":       info.get("returnOnEquity", np.nan),
+        "Beta":      info.get("beta", np.nan),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNCIÓN: Extraer datos financieros automáticamente desde Yahoo Finance
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False, ttl=86400)
+def extraer_datos_financieros_yf(ticker: str) -> dict:
+    """
+    Extrae automáticamente desde yfinance los datos financieros necesarios para el DCF:
+    EBIT, D&A, CapEx, variación KTNO y acciones en circulación.
+    Retorna un dict con los valores o np.nan si no están disponibles.
+    """
+    resultado = {
+        "ebit": np.nan, "dda": np.nan, "capex": np.nan,
+        "delta_ktno": np.nan, "acciones": np.nan,
+        "tasa_imp": np.nan, "beta": np.nan,
+        "fuente": "yfinance (automático)",
+    }
+    try:
+        t = yf.Ticker(ticker)
+        info = t.info
+
+        # Beta y acciones en circulación desde info
+        resultado["beta"]    = info.get("beta", np.nan)
+        resultado["acciones"] = info.get("sharesOutstanding", np.nan)
+
+        # ── Estado de Resultados ──────────────────────────────────────────────
+        fin = t.financials  # columnas = trimestres/años, index = conceptos
+        if fin is not None and not fin.empty:
+            def _get_row(df, keys):
+                """Busca la primera fila que coincida con alguna de las claves (case-insensitive)."""
+                for k in keys:
+                    matches = [i for i in df.index if k.lower() in str(i).lower()]
+                    if matches:
+                        val = df.loc[matches[0]].iloc[0]
+                        return float(val) if pd.notna(val) else np.nan
+                return np.nan
+
+            resultado["ebit"] = _get_row(fin, [
+                "EBIT", "Operating Income", "Operating income"
+            ])
+            resultado["tasa_imp"] = _get_row(fin, [
+                "Tax Rate For Calcs", "Tax Provision", "Income Tax"
+            ])
+            # Si obtuvimos Tax Provision en lugar de tasa, calculamos la tasa
+            pretax = _get_row(fin, ["Pretax Income", "Pre Tax Income"])
+            if pd.isna(resultado["tasa_imp"]) and not pd.isna(pretax) and pretax != 0:
+                tax_prov = _get_row(fin, ["Tax Provision", "Income Tax Expense"])
+                if not pd.isna(tax_prov):
+                    resultado["tasa_imp"] = abs(tax_prov) / abs(pretax)
+
+        # ── Flujo de Caja ─────────────────────────────────────────────────────
+        cf = t.cashflow
+        if cf is not None and not cf.empty:
+            def _get_cf(keys):
+                for k in keys:
+                    matches = [i for i in cf.index if k.lower() in str(i).lower()]
+                    if matches:
+                        val = cf.loc[matches[0]].iloc[0]
+                        return float(val) if pd.notna(val) else np.nan
+                return np.nan
+
+            dda_cf = _get_cf([
+                "Depreciation And Amortization",
+                "Depreciation Amortization Depletion",
+                "Depreciation",
+            ])
+            resultado["dda"] = dda_cf
+
+            capex_cf = _get_cf([
+                "Capital Expenditure", "Purchase Of PPE",
+                "Purchase of Property Plant and Equipment",
+            ])
+            # El CapEx suele venir negativo en el CF
+            if not pd.isna(capex_cf):
+                resultado["capex"] = abs(capex_cf)
+
+            # Variación KTNO: Changes in Working Capital
+            ktno_cf = _get_cf([
+                "Changes In Working Capital", "Change In Working Capital",
+                "Working Capital Changes",
+            ])
+            resultado["delta_ktno"] = ktno_cf if not pd.isna(ktno_cf) else 0.0
+
+    except Exception as e:
+        pass  # Si falla algo, retornamos lo que tengamos
+
+    return resultado
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNCIÓN: Clasificación de tickers (mejorada)
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False, ttl=86400)
+def clasificar_ticker(ticker):
+    """
+    Clasifica el ticker consultando yfinance. Usa múltiples campos para determinar
+    si es ETF, Acción u Otro. Se aplica cache de 24h para no repetir llamadas.
+    """
+    try:
+        info = yf.Ticker(ticker).info
+    except Exception:
+        info = {}
+
+    qt     = str(info.get("quoteType", "")).upper().strip()
+    fund   = info.get("fundFamily")
+    region = info.get("region") or info.get("market", "N/D")
+    name   = info.get("longName") or info.get("shortName") or ticker
+    sector = info.get("sector", "")
+
+    if qt == "ETF" or (fund and fund != "None"):
+        tipo   = "ETF"
+        emisor = fund or name
+    elif qt == "EQUITY":
+        tipo   = "Acción"
+        emisor = f"{name} ({sector})" if sector else name
+    elif qt in ("INDEX", "MUTUALFUND", "FUTURE", "CURRENCY", "CRYPTOCURRENCY"):
+        tipo   = qt.title()
+        emisor = name
+    elif qt:
+        tipo   = qt
+        emisor = name
+    else:
+        # Último recurso: si tiene sector → probablemente acción
+        if sector:
+            tipo   = "Acción"
+            emisor = f"{name} ({sector})"
+        else:
+            tipo   = "Otro"
+            emisor = name
+
+    return {"Ticker": ticker, "Tipo": tipo, "Región": region, "Emisor": emisor}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNCIÓN: Tipo de activo desde info
+# ─────────────────────────────────────────────────────────────────────────────
+def tipo_activo_desde_info(info):
+    qt   = str(info.get("quoteType", "")).upper().strip()
+    fund = info.get("fundFamily")
+    if qt == "ETF" or (fund and fund != "None"):
+        return "ETF"
+    elif qt == "EQUITY":
+        return "Acción"
+    elif qt in ("INDEX", "MUTUALFUND", "FUTURE", "CURRENCY", "CRYPTOCURRENCY"):
+        return qt.title()
+    elif info.get("sector"):
+        return "Acción"
+    return qt or "Otro"
+
 def valoracion_fundamental_etf(ticker):
     try:
         info = yf.Ticker(ticker).info
@@ -711,6 +897,456 @@ def tabla_comparacion_portafolios(tickers, mk, ms, mc) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 # ═════════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNCIÓN: Generar Investment Memo en PDF (ReportLab)
+# ─────────────────────────────────────────────────────────────────────────────
+def generar_investment_memo(
+    ticker_val, tickers_ok, benchmark, periodo, fund, tipo_val,
+    sen, score_tecnico, score_estadistico, score_fundamental, rec,
+    precios_port, rendimientos_port, mk_res, ms_res, mc_res,
+    dcf_result, rf,
+):
+    """
+    Genera un Investment Memo profesional en PDF usando ReportLab.
+    Retorna los bytes del PDF para su descarga.
+    """
+    import io
+    from reportlab.lib.pagesizes import letter, A4
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm, mm
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+        HRFlowable, KeepTogether
+    )
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
+
+    buffer = io.BytesIO()
+
+    # ── Configuración del documento ────────────────────────────────────────
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=2*cm, leftMargin=2*cm,
+        topMargin=2.5*cm, bottomMargin=2*cm,
+        title=f"Investment Memo – {ticker_val}",
+        author="Diego CR – Analizador de Portafolios",
+    )
+
+    # ── Colores corporativos ───────────────────────────────────────────────
+    C_DARK    = colors.HexColor("#0d1117")
+    C_ACCENT  = colors.HexColor("#1f6feb")
+    C_GREEN   = colors.HexColor("#238636")
+    C_RED     = colors.HexColor("#da3633")
+    C_ORANGE  = colors.HexColor("#d29922")
+    C_GRAY    = colors.HexColor("#8b949e")
+    C_LIGHT   = colors.HexColor("#f0f6fc")
+    C_BORDER  = colors.HexColor("#30363d")
+    C_HEADER_BG = colors.HexColor("#161b22")
+    C_ROW_ALT   = colors.HexColor("#f6f8fa")
+
+    rec_color_map = {"green": C_GREEN, "red": C_RED, "orange": C_ORANGE}
+    rec_color = rec_color_map.get(rec.get("color", "orange"), C_ORANGE)
+
+    # ── Estilos de texto ───────────────────────────────────────────────────
+    styles = getSampleStyleSheet()
+
+    def S(name, **kw):
+        return ParagraphStyle(name, **kw)
+
+    style_title = S("MemoTitle",
+        fontSize=26, fontName="Helvetica-Bold",
+        textColor=C_ACCENT, alignment=TA_LEFT,
+        spaceAfter=4, leading=30,
+    )
+    style_subtitle = S("MemoSubtitle",
+        fontSize=12, fontName="Helvetica",
+        textColor=C_GRAY, alignment=TA_LEFT,
+        spaceAfter=12, leading=16,
+    )
+    style_section = S("Section",
+        fontSize=13, fontName="Helvetica-Bold",
+        textColor=C_DARK, alignment=TA_LEFT,
+        spaceBefore=14, spaceAfter=6, leading=18,
+        borderPadding=(0, 0, 3, 0),
+    )
+    style_body = S("Body",
+        fontSize=9.5, fontName="Helvetica",
+        textColor=colors.HexColor("#24292f"),
+        alignment=TA_JUSTIFY, spaceAfter=4, leading=14,
+    )
+    style_small = S("Small",
+        fontSize=8, fontName="Helvetica",
+        textColor=C_GRAY, alignment=TA_LEFT,
+        spaceAfter=2, leading=11,
+    )
+    style_bold = S("Bold",
+        fontSize=9.5, fontName="Helvetica-Bold",
+        textColor=colors.HexColor("#24292f"),
+        spaceAfter=4, leading=14,
+    )
+    style_disclaimer = S("Disclaimer",
+        fontSize=7.5, fontName="Helvetica-Oblique",
+        textColor=C_GRAY, alignment=TA_CENTER,
+        spaceAfter=2, leading=11,
+    )
+    style_rec = S("Rec",
+        fontSize=18, fontName="Helvetica-Bold",
+        textColor=rec_color, alignment=TA_CENTER,
+        spaceAfter=4, leading=24,
+    )
+    style_metric_label = S("MetricLabel",
+        fontSize=8, fontName="Helvetica",
+        textColor=C_GRAY, alignment=TA_CENTER, leading=11,
+    )
+    style_metric_value = S("MetricValue",
+        fontSize=13, fontName="Helvetica-Bold",
+        textColor=C_DARK, alignment=TA_CENTER, leading=17,
+    )
+
+    def section_header(text):
+        """Genera un separador de sección con línea."""
+        return [
+            Spacer(1, 8),
+            HRFlowable(width="100%", thickness=0.5, color=C_BORDER),
+            Paragraph(text, style_section),
+        ]
+
+    def metric_table(items):
+        """Genera una tabla de métricas: lista de (label, value)."""
+        n = len(items)
+        col_w = (doc.width) / n
+        data = [
+            [Paragraph(lbl, style_metric_label) for lbl, _ in items],
+            [Paragraph(str(val), style_metric_value) for _, val in items],
+        ]
+        t = Table(data, colWidths=[col_w]*n)
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), C_LIGHT),
+            ("BACKGROUND", (0,1), (-1,1), colors.white),
+            ("BOX",        (0,0), (-1,-1), 0.5, C_BORDER),
+            ("INNERGRID",  (0,0), (-1,-1), 0.3, C_BORDER),
+            ("ALIGN",      (0,0), (-1,-1), "CENTER"),
+            ("VALIGN",     (0,0), (-1,-1), "MIDDLE"),
+            ("TOPPADDING", (0,0), (-1,-1), 6),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+        ]))
+        return t
+
+    def data_table(headers, rows, col_widths=None):
+        """Tabla genérica con cabecera y filas."""
+        if col_widths is None:
+            n = len(headers)
+            col_widths = [doc.width / n] * n
+        data = [headers] + rows
+        t = Table(data, colWidths=col_widths)
+        style_cmds = [
+            ("BACKGROUND",    (0,0), (-1,0), C_HEADER_BG),
+            ("TEXTCOLOR",     (0,0), (-1,0), colors.white),
+            ("FONTNAME",      (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE",      (0,0), (-1,0), 8.5),
+            ("ALIGN",         (0,0), (-1,-1), "CENTER"),
+            ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
+            ("FONTNAME",      (0,1), (-1,-1), "Helvetica"),
+            ("FONTSIZE",      (0,1), (-1,-1), 8),
+            ("TOPPADDING",    (0,0), (-1,-1), 5),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+            ("BOX",           (0,0), (-1,-1), 0.5, C_BORDER),
+            ("INNERGRID",     (0,0), (-1,-1), 0.3, C_BORDER),
+        ]
+        for i in range(1, len(data)):
+            if i % 2 == 0:
+                style_cmds.append(("BACKGROUND", (0,i), (-1,i), C_ROW_ALT))
+        t.setStyle(TableStyle(style_cmds))
+        return t
+
+    # ══════════════════════════════════════════════════════════════════════
+    # CONTENIDO DEL MEMO
+    # ══════════════════════════════════════════════════════════════════════
+    story = []
+
+    # ── 0. ENCABEZADO ──────────────────────────────────────────────────────
+    header_data = [[
+        Paragraph(
+            f"INVESTMENT MEMO",
+            S("H1", fontSize=22, fontName="Helvetica-Bold", textColor=colors.white, leading=26)
+        ),
+        Paragraph(
+            f"<b>{ticker_val}</b><br/>"
+            f"<font size=10 color='#8b949e'>{fund.get('nombre', ticker_val)} | "
+            f"{tipo_val} | {fund.get('sector', fund.get('emisor','N/D'))}</font>",
+            S("H2", fontSize=14, fontName="Helvetica-Bold", textColor=colors.white,
+              alignment=TA_RIGHT, leading=18)
+        ),
+    ]]
+    header_table = Table(header_data, colWidths=[doc.width*0.5, doc.width*0.5])
+    header_table.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,-1), C_HEADER_BG),
+        ("ALIGN",      (0,0), (0,0),  "LEFT"),
+        ("ALIGN",      (1,0), (1,0),  "RIGHT"),
+        ("VALIGN",     (0,0), (-1,-1), "MIDDLE"),
+        ("TOPPADDING", (0,0), (-1,-1), 16),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 16),
+        ("LEFTPADDING",   (0,0), (-1,-1), 14),
+        ("RIGHTPADDING",  (0,0), (-1,-1), 14),
+        ("BOX",        (0,0), (-1,-1), 1, C_ACCENT),
+    ]))
+    story.append(header_table)
+    story.append(Spacer(1, 6))
+
+    # Meta-información
+    meta_items = [
+        ("Fecha", str(datetime.date.today())),
+        ("Benchmark", benchmark),
+        ("Período analizado", periodo),
+        ("Activos en portafolio", str(len(tickers_ok))),
+        ("Tasa libre de riesgo", f"{rf*100:.2f}%"),
+    ]
+    story.append(metric_table(meta_items))
+    story.append(Spacer(1, 4))
+
+    # ── 1. RESUMEN EJECUTIVO ──────────────────────────────────────────────
+    story += section_header("1. RESUMEN EJECUTIVO")
+
+    nombre_activo = fund.get("nombre", ticker_val)
+    sector_activo = fund.get("sector", fund.get("Categoria", "N/D"))
+    precio_actual = fund.get("precio", np.nan)
+    precio_str = f"${precio_actual:.2f}" if not pd.isna(precio_actual) else "N/D"
+
+    rec_label = rec.get("recomendacion", "N/D").replace("🟢 ","").replace("🔴 ","").replace("🟡 ","")
+    rec_desc  = rec.get("descripcion", "")
+
+    story.append(Paragraph(
+        f"<b>{nombre_activo} ({ticker_val})</b> es un activo clasificado como <b>{tipo_val}</b> "
+        f"con precio de mercado de <b>{precio_str}</b>. "
+        f"Tras un análisis integrado de tres dimensiones (técnica, estadística y fundamental), "
+        f"el score ponderado arroja una recomendación de:",
+        style_body
+    ))
+    story.append(Spacer(1, 6))
+
+    rec_box_data = [[Paragraph(f"⬤  {rec_label}", style_rec)]]
+    rec_table = Table(rec_box_data, colWidths=[doc.width])
+    rec_table.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0), (-1,-1), C_LIGHT),
+        ("BOX",           (0,0), (-1,-1), 2, rec_color),
+        ("TOPPADDING",    (0,0), (-1,-1), 12),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 12),
+        ("ALIGN",         (0,0), (-1,-1), "CENTER"),
+    ]))
+    story.append(rec_table)
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(rec_desc, style_body))
+
+    # Score breakdown
+    score_items = [
+        ("Score Técnico", f"{rec.get('score_tec',0):+.4f}"),
+        ("Score Estadístico", f"{rec.get('score_est',0):+.4f}"),
+        ("Score Fundamental", f"{rec.get('score_fund',0):+.4f}"),
+        ("SCORE FINAL", f"{rec.get('score',0):+.4f}"),
+    ]
+    story.append(Spacer(1, 6))
+    story.append(metric_table(score_items))
+
+    # ── 2. DESCRIPCIÓN DEL ACTIVO ─────────────────────────────────────────
+    story += section_header("2. DESCRIPCIÓN DEL ACTIVO")
+
+    if "AUM" in fund:
+        # ETF
+        etf_rows = [
+            ["Nombre", nombre_activo],
+            ["Ticker", ticker_val],
+            ["Tipo", "ETF"],
+            ["Emisor / Gestora", str(fund.get("emisor","N/D"))],
+            ["Categoría", str(fund.get("Categoria","N/D"))],
+            ["Región", str(fund.get("Region","N/D"))],
+            ["AUM", f"${fund.get('AUM',np.nan):,.0f}" if not pd.isna(fund.get("AUM",np.nan)) else "N/D"],
+            ["Expense Ratio", f"{fund.get('Expense Ratio',np.nan)*100:.2f}%" if not pd.isna(fund.get("Expense Ratio",np.nan)) else "N/D"],
+            ["Beta", f"{fund.get('Beta',np.nan):.2f}" if not pd.isna(fund.get("Beta",np.nan)) else "N/D"],
+            ["Precio actual", precio_str],
+        ]
+        story.append(data_table(
+            ["Campo", "Valor"],
+            etf_rows,
+            col_widths=[doc.width*0.35, doc.width*0.65],
+        ))
+    else:
+        # Acción
+        acc_rows = [
+            ["Nombre", nombre_activo],
+            ["Ticker", ticker_val],
+            ["Tipo", "Acción"],
+            ["Sector", str(fund.get("sector","N/D"))],
+            ["Precio actual", precio_str],
+            ["P/E (Trailing)", f"{fund.get('P/E',np.nan):.1f}x" if not pd.isna(fund.get("P/E",np.nan)) else "N/D"],
+            ["P/B", f"{fund.get('P/B',np.nan):.2f}x" if not pd.isna(fund.get("P/B",np.nan)) else "N/D"],
+            ["EV/EBITDA", f"{fund.get('EV/EBITDA',np.nan):.1f}x" if not pd.isna(fund.get("EV/EBITDA",np.nan)) else "N/D"],
+            ["ROE", f"{fund.get('ROE',np.nan)*100:.1f}%" if not pd.isna(fund.get("ROE",np.nan)) else "N/D"],
+            ["Beta", f"{fund.get('Beta',np.nan):.2f}" if not pd.isna(fund.get("Beta",np.nan)) else "N/D"],
+        ]
+        story.append(data_table(
+            ["Campo", "Valor"],
+            acc_rows,
+            col_widths=[doc.width*0.35, doc.width*0.65],
+        ))
+
+    # ── 3. ANÁLISIS TÉCNICO ───────────────────────────────────────────────
+    story += section_header("3. ANÁLISIS TÉCNICO")
+
+    señales = sen.get("señales", {})
+    tec_rows = []
+    for ind_name, val in señales.items():
+        if val > 0:
+            señal_str = "ALCISTA"
+        elif val < 0:
+            señal_str = "BAJISTA"
+        else:
+            señal_str = "NEUTRAL"
+        detalle = ""
+        if ind_name == "Fibonacci":
+            detalle = sen.get("fib_desc", "")
+        tec_rows.append([ind_name, señal_str, f"{val:+.2f}", detalle])
+
+    story.append(data_table(
+        ["Indicador", "Señal", "Puntuación", "Detalle"],
+        tec_rows,
+        col_widths=[doc.width*0.2, doc.width*0.15, doc.width*0.12, doc.width*0.53],
+    ))
+    story.append(Spacer(1, 4))
+    story.append(Paragraph(
+        f"<b>RSI actual:</b> {sen.get('rsi_valor', 0):.2f} &nbsp;&nbsp; "
+        f"<b>Tendencia Fibonacci:</b> {sen.get('fib_tendencia','N/D')} &nbsp;&nbsp; "
+        f"<b>Score técnico:</b> {score_tecnico:+.4f}",
+        style_body
+    ))
+
+    # ── 4. ANÁLISIS ESTADÍSTICO ───────────────────────────────────────────
+    story += section_header("4. ANÁLISIS ESTADÍSTICO")
+    story.append(Paragraph(
+        f"<b>Score estadístico:</b> {score_estadistico:+.4f}. "
+        "Basado en regresión log-log frente al benchmark y análisis de percentiles históricos. "
+        "Un score positivo indica que el activo cotiza por debajo de su valor implícito "
+        "según la relación histórica con el benchmark.",
+        style_body
+    ))
+
+    # ── 5. ANÁLISIS FUNDAMENTAL ───────────────────────────────────────────
+    story += section_header("5. ANÁLISIS FUNDAMENTAL")
+
+    if dcf_result and dcf_result.get("wacc"):
+        story.append(Paragraph(
+            "El modelo DCF (Flujo de Caja Libre Descontado) produce los siguientes resultados:",
+            style_body
+        ))
+        dcf_items = [
+            ("WACC",          f"{dcf_result.get('wacc',0)*100:.2f}%"),
+            ("Ke (CAPM)",     f"{dcf_result.get('ke',0)*100:.2f}%"),
+            ("FCF calculado", f"${dcf_result.get('fcf',0):,.0f}"),
+            ("PO por DCF",    f"${dcf_result.get('po_dcf',0):.2f}"),
+            ("Potencial",     f"{dcf_result.get('potencial',0)*100:+.1f}%"),
+        ]
+        story.append(Spacer(1, 4))
+        story.append(metric_table(dcf_items))
+        story.append(Spacer(1, 4))
+        story.append(Paragraph(
+            f"VP flujos explícitos (5 años): ${dcf_result.get('vp_flujos',0):,.0f} &nbsp;&nbsp; "
+            f"VP valor terminal: ${dcf_result.get('vp_term',0):,.0f} &nbsp;&nbsp; "
+            f"Tasa crecimiento: {dcf_result.get('g_crec',0)*100:.1f}% &nbsp;&nbsp; "
+            f"Tasa terminal: {dcf_result.get('g_term',0)*100:.1f}%",
+            style_small
+        ))
+    else:
+        pe = fund.get("P/E", np.nan)
+        story.append(Paragraph(
+            f"No se realizó análisis DCF. "
+            + (f"P/E actual: {pe:.1f}x (score aproximado por múltiplos: {score_fundamental:+.2f})" if not pd.isna(pe) else
+               "Datos fundamentales no disponibles para este tipo de activo."),
+            style_body
+        ))
+
+    # ── 6. PORTAFOLIO – CONTEXTO ──────────────────────────────────────────
+    story += section_header("6. CONTEXTO DEL PORTAFOLIO")
+
+    # Métricas del portafolio
+    rend_port = rendimientos_port[tickers_ok] if all(t in rendimientos_port for t in tickers_ok) else rendimientos_port
+    rend_anual = (np.exp(rend_port.mean() * 252) - 1) * 100
+    vol_anual  = rend_port.std() * np.sqrt(252) * 100
+
+    story.append(Paragraph(
+        f"El portafolio analizado contiene {len(tickers_ok)} activos: "
+        f"<b>{', '.join(tickers_ok)}</b>. "
+        f"El benchmark de referencia es <b>{benchmark}</b>.",
+        style_body
+    ))
+    story.append(Spacer(1, 6))
+
+    # Tabla de pesos óptimos
+    port_rows = []
+    for i, t in enumerate(tickers_ok):
+        r = rend_anual[t] if t in rend_anual else np.nan
+        v = vol_anual[t]  if t in vol_anual  else np.nan
+        port_rows.append([
+            t,
+            f"{mk_res['pesos'][i]*100:.1f}%" if i < len(mk_res['pesos']) else "N/D",
+            f"{ms_res['pesos'][i]*100:.1f}%" if i < len(ms_res['pesos']) else "N/D",
+            f"{mc_res['pesos'][i]*100:.1f}%" if i < len(mc_res['pesos']) else "N/D",
+            f"{r:.2f}%" if not pd.isna(r) else "N/D",
+            f"{v:.2f}%" if not pd.isna(v) else "N/D",
+        ])
+
+    story.append(data_table(
+        ["Ticker", "Markowitz", "Máx Sharpe", "Monte Carlo", "Rend. EA", "Vol. EA"],
+        port_rows,
+        col_widths=[doc.width*0.14]*6,
+    ))
+    story.append(Spacer(1, 4))
+
+    # Métricas óptimas de portafolio
+    opt_items = [
+        ("Rend. EA (Markowitz)", f"{mk_res['rendimiento']*100:.2f}%"),
+        ("Sharpe (Markowitz)",   f"{mk_res['sharpe']:.4f}"),
+        ("Rend. EA (Max Sharpe)", f"{ms_res['rendimiento']*100:.2f}%"),
+        ("Sharpe (Max Sharpe)",  f"{ms_res['sharpe']:.4f}"),
+        ("Rend. EA (MonteCarlo)", f"{mc_res['rendimiento']*100:.2f}%"),
+        ("Sharpe (MonteCarlo)",  f"{mc_res['sharpe']:.4f}"),
+    ]
+    story.append(metric_table(opt_items))
+
+    # ── 7. RIESGOS Y CONSIDERACIONES ──────────────────────────────────────
+    story += section_header("7. RIESGOS Y CONSIDERACIONES")
+
+    riesgos = [
+        "Riesgo de mercado: variaciones en el índice de referencia pueden afectar significativamente el valor del activo.",
+        "Riesgo de liquidez: para activos de menor capitalización, puede haber spreads amplios o dificultad para ejecutar órdenes grandes.",
+        "Riesgo regulatorio: cambios en política monetaria, fiscal o regulatoria pueden impactar los fundamentales del activo.",
+        "Riesgo modelo: los scores técnico, estadístico y fundamental son herramientas cuantitativas con limitaciones inherentes.",
+        "Riesgo concentración: si el portafolio tiene alta ponderación en un sector, una corrección sectorial puede amplificar pérdidas.",
+        "Datos históricos: el análisis se basa en datos pasados, que no garantizan resultados futuros.",
+    ]
+    for r_text in riesgos:
+        story.append(Paragraph(f"• {r_text}", style_body))
+
+    # ── 8. DISCLAIMER ────────────────────────────────────────────────────
+    story.append(Spacer(1, 16))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=C_BORDER))
+    story.append(Spacer(1, 4))
+    story.append(Paragraph(
+        "AVISO LEGAL: Este documento ha sido generado automáticamente por la herramienta "
+        "Analizador de Portafolios desarrollada por Diego CR con fines exclusivamente académicos "
+        "e informativos. NO constituye asesoría de inversión, recomendación financiera ni oferta "
+        "de compra o venta de valores. Las proyecciones y scores presentados son resultado de "
+        "modelos cuantitativos y pueden diferir de la realidad. Consulte siempre a un asesor "
+        "financiero certificado antes de tomar decisiones de inversión. Datos: Yahoo Finance.",
+        style_disclaimer
+    ))
+
+    # ══════════════════════════════════════════════════════════════════════
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 #  PROCESAMIENTO PRINCIPAL
 # ═════════════════════════════════════════════════════════════════════════════
 tickers_raw = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
@@ -1575,62 +2211,139 @@ with tabs[4]:
         c4.metric("EV/EBITDA", f"{fund['EV/EBITDA']:.1f}x" if not pd.isna(fund['EV/EBITDA']) else "N/D")
         c5.metric("ROE",    f"{fund['ROE']*100:.1f}%"   if not pd.isna(fund['ROE'])       else "N/D")
 
+
         st.markdown("#### DCF – Flujo de Caja Libre Descontado")
-        st.caption("Ingresa los datos del último reporte para calcular el valor intrínseco.")
+        
+        # ── Carga automática desde Yahoo Finance ────────────────────────────
+        with st.spinner("🔄 Descargando datos financieros desde Yahoo Finance..."):
+            datos_yf = extraer_datos_financieros_yf(ticker_val)
+
+        # Mostrar estado de la extracción automática
+        datos_disponibles = sum(
+            1 for k in ["ebit","dda","capex","delta_ktno","acciones"]
+            if not pd.isna(datos_yf.get(k, np.nan))
+        )
+        if datos_disponibles >= 3:
+            st.success(
+                f"✅ Datos financieros cargados automáticamente desde Yahoo Finance "
+                f"({datos_disponibles}/5 variables disponibles). Puedes ajustar los valores manualmente."
+            )
+        elif datos_disponibles > 0:
+            st.warning(
+                f"⚠️ Datos parciales obtenidos de Yahoo Finance ({datos_disponibles}/5 variables). "
+                "Completa los campos faltantes manualmente."
+            )
+        else:
+            st.info("ℹ️ No se pudieron obtener datos automáticos de Yahoo Finance. Ingresa los datos manualmente.")
 
         score_fundamental = 0.0
 
-        with st.expander("📋 Ingresar datos financieros para DCF (opcional)"):
+        with st.expander("📋 Datos financieros para DCF (pre-cargados desde Yahoo Finance)", expanded=True):
+            
+            # Helper para mostrar hint de origen
+            def _hint(val, label):
+                if not pd.isna(val):
+                    return f"{label} ✅ (YF)"
+                return label
+
             c1, c2 = st.columns(2)
             with c1:
-                uo         = st.number_input("Utilidad Operativa (EBIT) 12M",       value=0.0, format="%.0f")
-                dda        = st.number_input("Depreciación y Amortización 12M",     value=0.0, format="%.0f")
-                capex      = st.number_input("CAPEX 12M",                            value=0.0, format="%.0f")
-                delta_ktno = st.number_input("Variación KTNO",                      value=0.0, format="%.0f")
-                tasa_imp   = st.number_input("Tasa de impuestos (decimal)",          value=0.25, format="%.4f")
+                _ebit_def = float(datos_yf["ebit"]) if not pd.isna(datos_yf["ebit"]) else 0.0
+                uo = st.number_input(
+                    _hint(datos_yf["ebit"], "Utilidad Operativa (EBIT) 12M"),
+                    value=_ebit_def, format="%.0f",
+                    help="Extraído automáticamente del estado de resultados de Yahoo Finance"
+                )
+
+                _dda_def = float(datos_yf["dda"]) if not pd.isna(datos_yf["dda"]) else 0.0
+                dda = st.number_input(
+                    _hint(datos_yf["dda"], "Depreciación y Amortización 12M"),
+                    value=_dda_def, format="%.0f",
+                    help="Extraído del flujo de caja de Yahoo Finance"
+                )
+
+                _capex_def = float(datos_yf["capex"]) if not pd.isna(datos_yf["capex"]) else 0.0
+                capex = st.number_input(
+                    _hint(datos_yf["capex"], "CAPEX 12M"),
+                    value=_capex_def, format="%.0f",
+                    help="Capital expenditures del flujo de caja de Yahoo Finance"
+                )
+
+                _ktno_def = float(datos_yf["delta_ktno"]) if not pd.isna(datos_yf["delta_ktno"]) else 0.0
+                delta_ktno = st.number_input(
+                    _hint(datos_yf["delta_ktno"], "Variación KTNO"),
+                    value=_ktno_def, format="%.0f",
+                    help="Cambio en capital de trabajo operativo neto"
+                )
+
+                _timp_def = float(datos_yf["tasa_imp"]) if not pd.isna(datos_yf["tasa_imp"]) and datos_yf["tasa_imp"] <= 1 else 0.25
+                tasa_imp = st.number_input(
+                    _hint(datos_yf["tasa_imp"], "Tasa de impuestos (decimal)"),
+                    value=_timp_def, format="%.4f", min_value=0.0, max_value=0.99,
+                    help="Tasa efectiva de impuestos del último año fiscal"
+                )
+
             with c2:
-                rf_dcf   = st.number_input("Tasa libre de riesgo",      value=rf,   format="%.4f")
-                r_mdo    = st.number_input("Retorno esperado del mercado", value=0.12, format="%.4f")
-                beta_dcf = st.number_input("Beta del activo",
-                                           value=fund["Beta"] if not pd.isna(fund["Beta"]) else 1.0,
-                                           format="%.4f")
-                kd       = st.number_input("Costo de la deuda kd (decimal)",        value=0.05, format="%.4f")
-                w_equity = st.number_input("Peso del equity (decimal)",              value=0.80, format="%.4f")
-                acciones = st.number_input("Acciones en circulación",                value=1e9,  format="%.0f")
-            calcular_dcf = st.button("Calcular Valor Intrínseco (DCF)")
+                rf_dcf = st.number_input("Tasa libre de riesgo", value=rf, format="%.4f")
+                r_mdo  = st.number_input("Retorno esperado del mercado", value=0.12, format="%.4f")
+
+                _beta_def = float(datos_yf["beta"]) if not pd.isna(datos_yf.get("beta", np.nan)) else (
+                    fund["Beta"] if not pd.isna(fund.get("Beta", np.nan)) else 1.0
+                )
+                beta_dcf = st.number_input(
+                    _hint(datos_yf.get("beta"), "Beta del activo"),
+                    value=_beta_def, format="%.4f",
+                    help="Beta extraído de Yahoo Finance"
+                )
+
+                kd       = st.number_input("Costo de la deuda kd (decimal)", value=0.05, format="%.4f")
+                w_equity = st.number_input("Peso del equity (decimal)", value=0.80, format="%.4f")
+
+                _acc_def = float(datos_yf["acciones"]) if not pd.isna(datos_yf.get("acciones", np.nan)) else 1e9
+                acciones = st.number_input(
+                    _hint(datos_yf.get("acciones"), "Acciones en circulación"),
+                    value=_acc_def, format="%.0f",
+                    help="Shares outstanding de Yahoo Finance"
+                )
+
+                g_crec_input = st.number_input(
+                    "Tasa de crecimiento FCF (5 años, decimal)",
+                    value=0.07, format="%.4f",
+                    help="Tasa anual de crecimiento del FCF para el período de proyección"
+                )
+                g_term_input = st.number_input(
+                    "Tasa de crecimiento terminal (decimal)",
+                    value=0.025, format="%.4f",
+                    help="Tasa de crecimiento perpetuo (usualmente 2-3%)"
+                )
+
+            calcular_dcf = st.button("🧮 Calcular Valor Intrínseco (DCF)", type="primary")
 
 # ========================= PARTE 9 / 10 =========================
+        # Guardar resultado DCF en session_state para el Investment Memo
+        if "dcf_result" not in st.session_state:
+            st.session_state.dcf_result = {}
+
         if calcular_dcf and uo > 0:
-            # Cálculo WACC
-            ke   = rf_dcf + beta_dcf * (r_mdo - rf_dcf)
-            kd_d = kd * (1 - tasa_imp)
-            wacc = ke * w_equity + kd_d * (1 - w_equity)
+            ke    = rf_dcf + beta_dcf * (r_mdo - rf_dcf)
+            kd_d  = kd * (1 - tasa_imp)
+            wacc  = ke * w_equity + kd_d * (1 - w_equity)
+            uodi  = uo * (1 - tasa_imp)
+            fcf   = uodi + dda - delta_ktno - capex
+            g_crec = g_crec_input
+            g_term = g_term_input
 
-            # FCF
-            uodi = uo * (1 - tasa_imp)
-            fcf  = uodi + dda - delta_ktno - capex
-
-            # Supuestos
-            g_crec = 0.07
-            g_term = 0.025
-
-            # Flujos 5 años
-            flujos = [fcf * (1 + g_crec)**t for t in range(1, 6)]
+            flujos   = [fcf * (1 + g_crec)**t for t in range(1, 6)]
             vp_flujos = sum(f / (1 + wacc)**t for t, f in enumerate(flujos, 1))
-
-            # Valor terminal
-            val_term = flujos[-1] * (1 + g_term) / (wacc - g_term) if wacc > g_term else 0
-            vp_term  = val_term / (1 + wacc)**5
-
-            # Equity value
+            val_term  = flujos[-1] * (1 + g_term) / (wacc - g_term) if wacc > g_term else 0
+            vp_term   = val_term / (1 + wacc)**5
             equity_val = vp_flujos + vp_term
             po_dcf     = equity_val / acciones if acciones > 0 else 0
-
-            precio_mdo   = fund.get("precio") or 0
+            precio_mdo  = fund.get("precio") or 0
             potencial_dcf = (po_dcf / precio_mdo - 1) if precio_mdo > 0 else 0
 
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("WACC",         f"{wacc*100:.2f}%")
+            c1.metric("WACC",          f"{wacc*100:.2f}%")
             c2.metric("FCF calculado", f"${fcf:,.0f}")
             c3.metric("PO por DCF",    f"${po_dcf:.2f}")
             c4.metric("Potencial",     f"{potencial_dcf*100:+.1f}%")
@@ -1638,8 +2351,14 @@ with tabs[4]:
             score_fundamental = float(np.clip(potencial_dcf * 2, -1, 1))
             st.write(f"**Score fundamental (DCF):** {score_fundamental:.4f}")
 
+            # Guardar en session_state para el memo
+            st.session_state.dcf_result = {
+                "wacc": wacc, "fcf": fcf, "po_dcf": po_dcf,
+                "potencial": potencial_dcf, "score": score_fundamental,
+                "ke": ke, "g_crec": g_crec, "g_term": g_term,
+                "vp_flujos": vp_flujos, "vp_term": vp_term,
+            }
         else:
-            # Score por múltiplos si no hay DCF
             pe = fund.get("P/E")
             if pe and not pd.isna(pe):
                 score_fundamental = 0.5 if pe < 15 else (-0.5 if pe > 30 else 0.0)
@@ -1684,6 +2403,46 @@ with tabs[4]:
         """,
         unsafe_allow_html=True,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INVESTMENT MEMO – Generación de PDF
+# ─────────────────────────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("📄 Investment Memo")
+    st.caption("Genera un Investment Memo profesional con todo el análisis del activo seleccionado y el portafolio.")
+
+    if st.button("📥 Generar Investment Memo (PDF)", type="primary", use_container_width=True):
+        with st.spinner("Generando Investment Memo..."):
+            pdf_bytes = generar_investment_memo(
+                ticker_val=ticker_val,
+                tickers_ok=tickers_ok,
+                benchmark=benchmark,
+                periodo=periodo,
+                fund=fund,
+                tipo_val=tipo_val,
+                sen=sen,
+                score_tecnico=score_tecnico,
+                score_estadistico=score_estadistico,
+                score_fundamental=score_fundamental,
+                rec=rec,
+                precios_port=precios_port,
+                rendimientos_port=rendimientos_port,
+                mk_res=mk_res,
+                ms_res=ms_res,
+                mc_res=mc_res,
+                dcf_result=st.session_state.get("dcf_result", {}),
+                rf=rf,
+            )
+        st.download_button(
+            label="⬇️ Descargar Investment Memo PDF",
+            data=pdf_bytes,
+            file_name=f"Investment_Memo_{ticker_val}_{datetime.date.today()}.pdf",
+            mime="application/pdf",
+            type="secondary",
+            use_container_width=True,
+        )
+        st.success("✅ Investment Memo generado exitosamente.")
 
 # ========================= PARTE 10 / 10 =========================
 # ═════════════════════════════════════════════════════════════════════════════

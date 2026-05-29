@@ -1,4 +1,3 @@
-
 """
 ================================================================================
   ANALIZADOR DE PORTAFOLIOS & VALORACIÓN DE ACTIVOS
@@ -298,64 +297,186 @@ def extraer_datos_financieros_yf(ticker: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FUNCIÓN: Clasificación de tickers (mejorada)
+# LISTAS DE REFERENCIA: ETFs y Acciones conocidas
+# Usadas como fallback cuando yfinance no responde o devuelve campos vacíos
+# ─────────────────────────────────────────────────────────────────────────────
+_ETF_CONOCIDOS = {
+    # Grandes ETFs de EE.UU.
+    "SPY","QQQ","IWM","IWB","IWD","IWF","MDY","DIA","EFA","EEM","VTI","VOO","VEA","VWO",
+    # Sector SPDR
+    "XLK","XLF","XLE","XLV","XLI","XLU","XLP","XLB","XLRE","XLY","XLC",
+    # Semiconductores y Tech
+    "SOXX","SMH","IGV","FTEC","VGT","IYW",
+    # Temáticos
+    "ARKK","ARKG","ARKW","ARKF","ARKQ","ARKX",
+    "BOTZ","ROBO","HACK","CIBR","CLOU","SKYY","WCLD","BUG",
+    # Commodities
+    "GLD","SLV","IAU","PDBC","USO","UNG","DBO","DJP","GSG",
+    # Renta fija
+    "TLT","IEF","SHY","BIL","LQD","HYG","AGG","BND","MUB","TLH","EDV","ZROZ",
+    # Geografía/Emergentes
+    "KWEB","MCHI","FXI","EWZ","EWT","EWY","EWJ","EWG","EWU","IEMG","ACWI","URTH",
+    # Real estate / otros
+    "VNQ","SCHH","IYR",
+    # Factor
+    "USMV","QUAL","MTUM","SIZE","VLUE",
+    # Small/mid
+    "IWO","IWN","IJH","IJR","VBR","VBK",
+    # Inversos/apalancados
+    "SQQQ","TQQQ","SPXU","SPXS","UPRO","SPXL","SH","SSO","DDM","DXD",
+    "UVXY","SVXY","VXX","VIXY",
+    # Sector financiero
+    "KRE","KBE","IAT",
+    # Salud/Biotech
+    "IBB","XBI","PBE","IHI",
+    # Minería/Energía
+    "GDX","GDXJ","SIL","COPX","LIT","REMX",
+    # Internacional
+    "VEU","VXUS","IXUS","CWI",
+}
+
+_ACCION_CONOCIDAS = {
+    # Semiconductores
+    "NVDA","AMD","INTC","QCOM","TXN","MU","KLAC","LRCX","AMAT","SNPS","CDNS",
+    "MRVL","NXPI","ON","SMCI","TSM","ASML","AVGO","IFNNY","ARMH","ARM",
+    "ADI","MCHP","SWKS","QRVO","MPWR","WOLF","CREE",
+    # Big Tech
+    "AAPL","MSFT","GOOGL","GOOG","META","AMZN","TSLA","NFLX","UBER","LYFT",
+    "IBM","HPQ","HPE","DELL","CSCO","ORCL","CRM","NOW","ADBE","INTU","WDAY",
+    "SNOW","PLTR","DDOG","NET","ZS","CRWD","OKTA","TEAM","ATLASSIAN","PATH",
+    # Finanzas
+    "JPM","BAC","GS","MS","WFC","C","BLK","SCHW","AXP","COF","USB","PNC",
+    # Salud
+    "JNJ","UNH","LLY","PFE","MRK","ABBV","BMY","AMGN","GILD","BIIB","REGN","VRTX",
+    # Energía
+    "XOM","CVX","COP","SLB","HAL","PXD","OXY","PSX","VLO",
+    # Industrial/Defensa
+    "BA","LMT","RTX","GD","NOC","CAT","DE","HON","GE","MMM",
+    # Consumo
+    "AMZN","TGT","WMT","COST","HD","LOW","NKE","SBUX","MCD","YUM",
+    # Telecomunicaciones
+    "T","VZ","TMUS",
+    # Financiero internacional
+    "BABA","JD","PDD","BIDU","SE","GRAB","MELI","NU",
+}
+
+import re as _re
+
+def _clasificar_tipo(ticker: str, info: dict) -> str:
+    """
+    Clasificación multi-capa. Devuelve: 'ETF', 'Acción', 'Índice', 'Futuro', u 'Otro'.
+
+    Capas (en orden de prioridad):
+    0. Prefijos especiales (^, =F)
+    1. Lista hardcoded de ETFs y acciones conocidas
+    2. Campos yfinance.info (quoteType, fundFamily, sector)
+    3. fast_info.quote_type (endpoint más liviano de yfinance)
+    4. Heurísticas de patrón de ticker
+    5. Default inteligente (Acción para tickers 1-5 letras)
+    """
+    t = ticker.upper().strip()
+
+    # Capa 0: prefijos especiales
+    if t.startswith("^"):
+        return "Índice"
+    if t.endswith("=F"):
+        return "Futuro"
+    if t.endswith("=X"):
+        return "Divisa"
+
+    # Capa 1: listas hardcoded (más confiables que API)
+    if t in _ETF_CONOCIDOS:
+        return "ETF"
+    if t in _ACCION_CONOCIDAS:
+        return "Acción"
+
+    # Capa 2: yfinance.info
+    qt     = str(info.get("quoteType","") or "").upper().strip()
+    fund   = str(info.get("fundFamily","") or "").strip()
+    sector = str(info.get("sector","") or "").strip()
+
+    if qt == "ETF" or (fund and fund.lower() not in ("none","n/a","","nan")):
+        return "ETF"
+    if qt == "EQUITY" or sector:
+        return "Acción"
+    if qt == "INDEX":
+        return "Índice"
+    if qt == "MUTUALFUND":
+        return "Fondo Mutuo"
+    if qt in ("FUTURE","FUTURES"):
+        return "Futuro"
+    if qt in ("CURRENCY","FOREX"):
+        return "Divisa"
+    if qt == "CRYPTOCURRENCY":
+        return "Cripto"
+
+    # Capa 3: fast_info (endpoint alternativo de yfinance, falla menos)
+    try:
+        fi = yf.Ticker(ticker).fast_info
+        fiqt = str(getattr(fi, "quote_type", "") or "").upper().strip()
+        if fiqt == "ETF":
+            return "ETF"
+        if fiqt == "EQUITY":
+            return "Acción"
+        if fiqt:
+            return fiqt.title()
+    except Exception:
+        pass
+
+    # Capa 4: heurísticas de nombre/patrón
+    # Tickers con punto → acción internacional (BRK.B, 005930.KS)
+    if "." in t or any(c.isdigit() for c in t):
+        return "Acción"
+    # Regex para patrones de ETF conocidos
+    if _re.search(
+        r"^(TQQQ|SQQQ|UPRO|SPXL|SPXU|SPXS|UVXY|SVXY|VXX|VIXY|"
+        r"SH|SSO|DDM|DXD|TWM|MZZ|SDS|QID|QLD|"
+        r"RPAR|NTSX|HNDL|SWAN|DRSK)$", t
+    ):
+        return "ETF"
+
+    # Capa 5: default inteligente
+    # En NYSE/NASDAQ la inmensa mayoría de tickers de 1-5 letras son acciones
+    if _re.match(r"^[A-Z]{1,5}$", t):
+        return "Acción"
+
+    return "Otro"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNCIÓN: Clasificación de tickers (para la tabla del portafolio)
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False, ttl=86400)
 def clasificar_ticker(ticker):
-    """
-    Clasifica el ticker consultando yfinance. Usa múltiples campos para determinar
-    si es ETF, Acción u Otro. Se aplica cache de 24h para no repetir llamadas.
-    """
+    """Clasifica un ticker y devuelve dict con Ticker, Tipo, Región, Emisor."""
     try:
-        info = yf.Ticker(ticker).info
+        info = yf.Ticker(ticker).info or {}
     except Exception:
         info = {}
 
-    qt     = str(info.get("quoteType", "")).upper().strip()
-    fund   = info.get("fundFamily")
-    region = info.get("region") or info.get("market", "N/D")
-    name   = info.get("longName") or info.get("shortName") or ticker
-    sector = info.get("sector", "")
+    tipo   = _clasificar_tipo(ticker, info)
+    region = str(info.get("region") or info.get("market") or "N/D")
+    name   = str(info.get("longName") or info.get("shortName") or ticker)
+    sector = str(info.get("sector") or "")
+    fund   = str(info.get("fundFamily") or "")
 
-    if qt == "ETF" or (fund and fund != "None"):
-        tipo   = "ETF"
-        emisor = fund or name
-    elif qt == "EQUITY":
-        tipo   = "Acción"
+    if tipo == "ETF":
+        emisor = fund if fund and fund.lower() not in ("none","n/a","","nan") else name
+    elif tipo == "Acción":
         emisor = f"{name} ({sector})" if sector else name
-    elif qt in ("INDEX", "MUTUALFUND", "FUTURE", "CURRENCY", "CRYPTOCURRENCY"):
-        tipo   = qt.title()
-        emisor = name
-    elif qt:
-        tipo   = qt
-        emisor = name
     else:
-        # Último recurso: si tiene sector → probablemente acción
-        if sector:
-            tipo   = "Acción"
-            emisor = f"{name} ({sector})"
-        else:
-            tipo   = "Otro"
-            emisor = name
+        emisor = name
 
     return {"Ticker": ticker, "Tipo": tipo, "Región": region, "Emisor": emisor}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FUNCIÓN: Tipo de activo desde info
+# FUNCIÓN: Tipo de activo desde info dict (para valoración individual)
 # ─────────────────────────────────────────────────────────────────────────────
 def tipo_activo_desde_info(info):
-    qt   = str(info.get("quoteType", "")).upper().strip()
-    fund = info.get("fundFamily")
-    if qt == "ETF" or (fund and fund != "None"):
-        return "ETF"
-    elif qt == "EQUITY":
-        return "Acción"
-    elif qt in ("INDEX", "MUTUALFUND", "FUTURE", "CURRENCY", "CRYPTOCURRENCY"):
-        return qt.title()
-    elif info.get("sector"):
-        return "Acción"
-    return qt or "Otro"
+    """Wrapper que usa _clasificar_tipo con el ticker extraído del info."""
+    ticker = str(info.get("symbol","") or "")
+    return _clasificar_tipo(ticker, info)
 
 def valoracion_fundamental_etf(ticker):
     try:
@@ -399,11 +520,12 @@ def valoracion_fundamental_basica(ticker):
 # ─────────────────────────────────────────────────────────────────────────────
 def valoracion_fundamental_general(ticker):
     try:
-        info = yf.Ticker(ticker).info
-    except:
+        info = yf.Ticker(ticker).info or {}
+    except Exception:
         info = {}
 
-    tipo = tipo_activo_desde_info(info)
+    # Usar _clasificar_tipo directamente pasando el ticker para máxima precisión
+    tipo = _clasificar_tipo(ticker, info)
 
     if tipo == "ETF":
         return valoracion_fundamental_etf(ticker)
@@ -1716,19 +1838,17 @@ with tabs[4]:
     ticker_val = st.selectbox("Selecciona el ticker a valorar", options=tickers_ok, key="val_sel")
 
     # ── Detectar tipo de activo para ajustar pesos por defecto ──────────────
-    @st.cache_data(show_spinner=False)
+    @st.cache_data(show_spinner=False, ttl=86400)
     def _detectar_tipo(ticker_sym: str) -> str:
-        """Devuelve 'ETF', 'Acción' u 'Otro' consultando yfinance.info."""
+        """
+        Detecta el tipo de activo usando la función multi-capa _clasificar_tipo.
+        Mucho más confiable que depender solo de yfinance.info.
+        """
         try:
-            info = yf.Ticker(ticker_sym).info
-            qt   = str(info.get("quoteType", "")).upper()
-            if qt == "ETF" or info.get("fundFamily"):
-                return "ETF"
-            elif qt == "EQUITY":
-                return "Acción"
-            return qt or "Otro"
+            info = yf.Ticker(ticker_sym).info or {}
         except Exception:
-            return "Otro"
+            info = {}
+        return _clasificar_tipo(ticker_sym, info)
 
     tipo_val = _detectar_tipo(ticker_val)
 

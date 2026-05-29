@@ -1,3 +1,4 @@
+
 """
 ================================================================================
   ANALIZADOR DE PORTAFOLIOS & VALORACIÓN DE ACTIVOS
@@ -901,6 +902,7 @@ def tabla_comparacion_portafolios(tickers, mk, ms, mc) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 # FUNCIÓN: Generar Investment Memo en PDF (ReportLab)
 # ─────────────────────────────────────────────────────────────────────────────
+
 def generar_investment_memo(
     ticker_val, tickers_ok, benchmark, periodo, fund, tipo_val,
     sen, score_tecnico, score_estadistico, score_fundamental, rec,
@@ -908,446 +910,460 @@ def generar_investment_memo(
     dcf_result, rf,
 ):
     """
-    Genera un Investment Memo profesional en PDF usando ReportLab.
-    Retorna los bytes del PDF para su descarga.
+    Genera un Investment Memo profesional en PDF usando fpdf2.
+    Retorna bytes del PDF para descarga con st.download_button.
     """
-    import io
-    from reportlab.lib.pagesizes import letter, A4
-    from reportlab.lib import colors
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import cm, mm
-    from reportlab.platypus import (
-        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-        HRFlowable, KeepTogether
-    )
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
+    try:
+        from fpdf import FPDF, XPos, YPos
+    except ImportError:
+        raise ImportError(
+            "Instala fpdf2: agrégalo a requirements.txt o ejecuta: pip install fpdf2"
+        )
 
-    buffer = io.BytesIO()
-
-    # ── Configuración del documento ────────────────────────────────────────
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        rightMargin=2*cm, leftMargin=2*cm,
-        topMargin=2.5*cm, bottomMargin=2*cm,
-        title=f"Investment Memo – {ticker_val}",
-        author="Diego CR – Analizador de Portafolios",
-    )
-
-    # ── Colores corporativos ───────────────────────────────────────────────
-    C_DARK    = colors.HexColor("#0d1117")
-    C_ACCENT  = colors.HexColor("#1f6feb")
-    C_GREEN   = colors.HexColor("#238636")
-    C_RED     = colors.HexColor("#da3633")
-    C_ORANGE  = colors.HexColor("#d29922")
-    C_GRAY    = colors.HexColor("#8b949e")
-    C_LIGHT   = colors.HexColor("#f0f6fc")
-    C_BORDER  = colors.HexColor("#30363d")
-    C_HEADER_BG = colors.HexColor("#161b22")
-    C_ROW_ALT   = colors.HexColor("#f6f8fa")
+    # ── Colores (R,G,B) ──────────────────────────────────────────────────
+    C_DARK      = (13,  17,  23)
+    C_ACCENT    = (31, 111, 235)
+    C_GREEN     = (35, 134,  54)
+    C_RED       = (218,  54,  51)
+    C_ORANGE    = (210, 153,  34)
+    C_GRAY      = (139, 148, 158)
+    C_LIGHT     = (240, 246, 252)
+    C_BORDER    = (48,  54,  61)
+    C_HEADER_BG = (22,  27,  34)
+    C_WHITE     = (255, 255, 255)
+    C_TEXT      = (36,  41,  47)
+    C_ROW_ALT   = (246, 248, 250)
 
     rec_color_map = {"green": C_GREEN, "red": C_RED, "orange": C_ORANGE}
-    rec_color = rec_color_map.get(rec.get("color", "orange"), C_ORANGE)
+    rec_color     = rec_color_map.get(rec.get("color", "orange"), C_ORANGE)
 
-    # ── Estilos de texto ───────────────────────────────────────────────────
-    styles = getSampleStyleSheet()
+    # ── Clase PDF ─────────────────────────────────────────────────────────
+    class MemoPDF(FPDF):
+        def __init__(self):
+            super().__init__(orientation="P", unit="mm", format="A4")
+            self.set_auto_page_break(auto=True, margin=22)
+            self.set_margins(18, 18, 18)
+            self._ticker_val = ticker_val
 
-    def S(name, **kw):
-        return ParagraphStyle(name, **kw)
+        def header(self):
+            if self.page_no() == 1:
+                return
+            self.set_fill_color(*C_DARK)
+            self.rect(0, 0, 210, 11, "F")
+            self.set_font("Helvetica", "B", 7.5)
+            self.set_text_color(*C_GRAY)
+            self.set_xy(18, 2.5)
+            self.cell(90, 6, f"INVESTMENT MEMO  ·  {self._ticker_val}", align="L")
+            self.cell(0, 6, f"Página {self.page_no()}  ·  {str(datetime.date.today())}", align="R")
+            self.ln(5)
 
-    style_title = S("MemoTitle",
-        fontSize=26, fontName="Helvetica-Bold",
-        textColor=C_ACCENT, alignment=TA_LEFT,
-        spaceAfter=4, leading=30,
-    )
-    style_subtitle = S("MemoSubtitle",
-        fontSize=12, fontName="Helvetica",
-        textColor=C_GRAY, alignment=TA_LEFT,
-        spaceAfter=12, leading=16,
-    )
-    style_section = S("Section",
-        fontSize=13, fontName="Helvetica-Bold",
-        textColor=C_DARK, alignment=TA_LEFT,
-        spaceBefore=14, spaceAfter=6, leading=18,
-        borderPadding=(0, 0, 3, 0),
-    )
-    style_body = S("Body",
-        fontSize=9.5, fontName="Helvetica",
-        textColor=colors.HexColor("#24292f"),
-        alignment=TA_JUSTIFY, spaceAfter=4, leading=14,
-    )
-    style_small = S("Small",
-        fontSize=8, fontName="Helvetica",
-        textColor=C_GRAY, alignment=TA_LEFT,
-        spaceAfter=2, leading=11,
-    )
-    style_bold = S("Bold",
-        fontSize=9.5, fontName="Helvetica-Bold",
-        textColor=colors.HexColor("#24292f"),
-        spaceAfter=4, leading=14,
-    )
-    style_disclaimer = S("Disclaimer",
-        fontSize=7.5, fontName="Helvetica-Oblique",
-        textColor=C_GRAY, alignment=TA_CENTER,
-        spaceAfter=2, leading=11,
-    )
-    style_rec = S("Rec",
-        fontSize=18, fontName="Helvetica-Bold",
-        textColor=rec_color, alignment=TA_CENTER,
-        spaceAfter=4, leading=24,
-    )
-    style_metric_label = S("MetricLabel",
-        fontSize=8, fontName="Helvetica",
-        textColor=C_GRAY, alignment=TA_CENTER, leading=11,
-    )
-    style_metric_value = S("MetricValue",
-        fontSize=13, fontName="Helvetica-Bold",
-        textColor=C_DARK, alignment=TA_CENTER, leading=17,
-    )
+        def footer(self):
+            self.set_y(-13)
+            self.set_font("Helvetica", "I", 6.5)
+            self.set_text_color(*C_GRAY)
+            self.cell(
+                0, 5,
+                "Documento generado automáticamente · Solo para fines informativos · "
+                "No constituye asesoría de inversión · Datos: Yahoo Finance vía yfinance",
+                align="C",
+            )
 
-    def section_header(text):
-        """Genera un separador de sección con línea."""
-        return [
-            Spacer(1, 8),
-            HRFlowable(width="100%", thickness=0.5, color=C_BORDER),
-            Paragraph(text, style_section),
-        ]
+    pdf = MemoPDF()
 
-    def metric_table(items):
-        """Genera una tabla de métricas: lista de (label, value)."""
+    # ── Helpers ───────────────────────────────────────────────────────────
+    PAGE_W = 210 - 36  # usable width (margins 18 each side)
+
+    def safe(text):
+        """Convierte texto a latin-1 seguro para fpdf2 con fuentes base."""
+        if not isinstance(text, str):
+            text = str(text)
+        reps = {
+            '\u2013': '-', '\u2014': '--', '\u2018': "'", '\u2019': "'",
+            '\u201c': '"', '\u201d': '"', '\u2022': '*', '\u00b7': '.',
+            '\u2026': '...', '\u00b0': 'deg', '\u00ae': '(R)',
+            '\u00a9': '(C)', '\u20ac': 'EUR', '\u00a3': 'GBP', '\u00a0': ' ',
+        }
+        for o, r in reps.items():
+            text = text.replace(o, r)
+        return text.encode('latin-1', errors='replace').decode('latin-1')
+
+
+    def set_color(rgb):
+        pdf.set_text_color(*rgb)
+
+    def fill_rect(x, y, w, h, rgb):
+        pdf.set_fill_color(*rgb)
+        pdf.rect(x, y, w, h, "F")
+
+    def section_title(text):
+        pdf.ln(4)
+        pdf.set_draw_color(*C_BORDER)
+        pdf.set_line_width(0.4)
+        pdf.line(18, pdf.get_y(), 192, pdf.get_y())
+        pdf.ln(2)
+        pdf.set_font("Helvetica", "B", 11)
+        set_color(C_DARK)
+        pdf.cell(0, 7, safe(text), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.ln(1)
+
+    def body_text(text, italic=False):
+        pdf.set_x(18)
+        pdf.set_font("Helvetica", "I" if italic else "", 9)
+        set_color(C_TEXT)
+        pdf.multi_cell(PAGE_W, 5.5, safe(text), align="J")
+        pdf.ln(1)
+
+    def small_text(text):
+        pdf.set_x(18)
+        pdf.set_font("Helvetica", "I", 7.5)
+        set_color(C_GRAY)
+        pdf.multi_cell(PAGE_W, 4.5, safe(text), align="J")
+
+    def kv_row(label, value, fill=False):
+        """Una fila clave–valor en tabla de 2 columnas."""
+        if fill:
+            pdf.set_fill_color(*C_ROW_ALT)
+        pdf.set_font("Helvetica", "B", 8.5)
+        set_color(C_GRAY)
+        pdf.cell(58, 7, label, border="B", fill=fill, align="L")
+        pdf.set_font("Helvetica", "", 8.5)
+        set_color(C_TEXT)
+        pdf.cell(0, 7, str(value), border="B", fill=fill,
+                 new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    def metrics_row(items):
+        """Fila de métricas: lista de (label, value, [note])."""
         n = len(items)
-        col_w = (doc.width) / n
-        data = [
-            [Paragraph(lbl, style_metric_label) for lbl, _ in items],
-            [Paragraph(str(val), style_metric_value) for _, val in items],
-        ]
-        t = Table(data, colWidths=[col_w]*n)
-        t.setStyle(TableStyle([
-            ("BACKGROUND", (0,0), (-1,0), C_LIGHT),
-            ("BACKGROUND", (0,1), (-1,1), colors.white),
-            ("BOX",        (0,0), (-1,-1), 0.5, C_BORDER),
-            ("INNERGRID",  (0,0), (-1,-1), 0.3, C_BORDER),
-            ("ALIGN",      (0,0), (-1,-1), "CENTER"),
-            ("VALIGN",     (0,0), (-1,-1), "MIDDLE"),
-            ("TOPPADDING", (0,0), (-1,-1), 6),
-            ("BOTTOMPADDING", (0,0), (-1,-1), 6),
-        ]))
-        return t
+        col_w = PAGE_W / n
+        y0 = pdf.get_y()
+        for i, item in enumerate(items):
+            lbl  = item[0]
+            val  = item[1]
+            note = item[2] if len(item) > 2 else ""
+            x = 18 + i * col_w
+            # Fondo
+            pdf.set_fill_color(*(C_LIGHT if i % 2 == 0 else C_WHITE))
+            pdf.rect(x, y0, col_w, 18, "F")
+            # Borde
+            pdf.set_draw_color(*C_BORDER)
+            pdf.set_line_width(0.3)
+            pdf.rect(x, y0, col_w, 18)
+            # Label
+            pdf.set_xy(x + 1, y0 + 1.5)
+            pdf.set_font("Helvetica", "", 7)
+            set_color(C_GRAY)
+            pdf.cell(col_w - 2, 4, safe(lbl), align="C")
+            # Value
+            fs = 11 if len(str(val)) <= 8 else 9
+            pdf.set_xy(x + 1, y0 + 6)
+            pdf.set_font("Helvetica", "B", fs)
+            set_color(C_TEXT)
+            pdf.cell(col_w - 2, 7, safe(str(val)), align="C")
+            # Note
+            if note:
+                pdf.set_xy(x + 1, y0 + 13.5)
+                pdf.set_font("Helvetica", "I", 6.5)
+                set_color(C_GRAY)
+                pdf.cell(col_w - 2, 3.5, safe(str(note)), align="C")
+        pdf.set_xy(18, y0 + 20)
 
-    def data_table(headers, rows, col_widths=None):
-        """Tabla genérica con cabecera y filas."""
+    def table(headers, rows, col_widths=None, zebra=True):
+        """Tabla genérica con cabecera oscura."""
         if col_widths is None:
             n = len(headers)
-            col_widths = [doc.width / n] * n
-        data = [headers] + rows
-        t = Table(data, colWidths=col_widths)
-        style_cmds = [
-            ("BACKGROUND",    (0,0), (-1,0), C_HEADER_BG),
-            ("TEXTCOLOR",     (0,0), (-1,0), colors.white),
-            ("FONTNAME",      (0,0), (-1,0), "Helvetica-Bold"),
-            ("FONTSIZE",      (0,0), (-1,0), 8.5),
-            ("ALIGN",         (0,0), (-1,-1), "CENTER"),
-            ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
-            ("FONTNAME",      (0,1), (-1,-1), "Helvetica"),
-            ("FONTSIZE",      (0,1), (-1,-1), 8),
-            ("TOPPADDING",    (0,0), (-1,-1), 5),
-            ("BOTTOMPADDING", (0,0), (-1,-1), 5),
-            ("BOX",           (0,0), (-1,-1), 0.5, C_BORDER),
-            ("INNERGRID",     (0,0), (-1,-1), 0.3, C_BORDER),
-        ]
-        for i in range(1, len(data)):
-            if i % 2 == 0:
-                style_cmds.append(("BACKGROUND", (0,i), (-1,i), C_ROW_ALT))
-        t.setStyle(TableStyle(style_cmds))
-        return t
+            col_widths = [PAGE_W / n] * n
+        # Header
+        pdf.set_fill_color(*C_HEADER_BG)
+        pdf.set_text_color(*C_WHITE)
+        pdf.set_font("Helvetica", "B", 8)
+        for h, w in zip(headers, col_widths):
+            pdf.cell(w, 7, safe(str(h)), border=1, fill=True, align="C")
+        pdf.ln()
+        # Rows
+        for ri, row in enumerate(rows):
+            if zebra and ri % 2 == 0:
+                pdf.set_fill_color(*C_ROW_ALT)
+                fill_flag = True
+            else:
+                pdf.set_fill_color(*C_WHITE)
+                fill_flag = True
+            pdf.set_text_color(*C_TEXT)
+            pdf.set_font("Helvetica", "", 8)
+            for v, w in zip(row, col_widths):
+                pdf.cell(w, 6.5, safe(str(v)), border=1, fill=fill_flag, align="C")
+            pdf.ln()
+        pdf.ln(2)
 
     # ══════════════════════════════════════════════════════════════════════
-    # CONTENIDO DEL MEMO
+    #  PÁGINA 1 – PORTADA
     # ══════════════════════════════════════════════════════════════════════
-    story = []
+    pdf.add_page()
 
-    # ── 0. ENCABEZADO ──────────────────────────────────────────────────────
-    header_data = [[
-        Paragraph(
-            f"INVESTMENT MEMO",
-            S("H1", fontSize=22, fontName="Helvetica-Bold", textColor=colors.white, leading=26)
-        ),
-        Paragraph(
-            f"<b>{ticker_val}</b><br/>"
-            f"<font size=10 color='#8b949e'>{fund.get('nombre', ticker_val)} | "
-            f"{tipo_val} | {fund.get('sector', fund.get('emisor','N/D'))}</font>",
-            S("H2", fontSize=14, fontName="Helvetica-Bold", textColor=colors.white,
-              alignment=TA_RIGHT, leading=18)
-        ),
-    ]]
-    header_table = Table(header_data, colWidths=[doc.width*0.5, doc.width*0.5])
-    header_table.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,-1), C_HEADER_BG),
-        ("ALIGN",      (0,0), (0,0),  "LEFT"),
-        ("ALIGN",      (1,0), (1,0),  "RIGHT"),
-        ("VALIGN",     (0,0), (-1,-1), "MIDDLE"),
-        ("TOPPADDING", (0,0), (-1,-1), 16),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 16),
-        ("LEFTPADDING",   (0,0), (-1,-1), 14),
-        ("RIGHTPADDING",  (0,0), (-1,-1), 14),
-        ("BOX",        (0,0), (-1,-1), 1, C_ACCENT),
-    ]))
-    story.append(header_table)
-    story.append(Spacer(1, 6))
+    # Banda superior de color
+    fill_rect(0, 0, 210, 42, C_DARK)
+    pdf.set_xy(18, 8)
+    pdf.set_font("Helvetica", "B", 28)
+    set_color(C_ACCENT)
+    pdf.cell(0, 12, "INVESTMENT MEMO", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-    # Meta-información
-    meta_items = [
-        ("Fecha", str(datetime.date.today())),
-        ("Benchmark", benchmark),
-        ("Período analizado", periodo),
-        ("Activos en portafolio", str(len(tickers_ok))),
-        ("Tasa libre de riesgo", f"{rf*100:.2f}%"),
-    ]
-    story.append(metric_table(meta_items))
-    story.append(Spacer(1, 4))
+    pdf.set_x(18)
+    pdf.set_font("Helvetica", "B", 14)
+    set_color(C_WHITE)
+    nombre_short = fund.get("nombre", ticker_val)[:55]
+    pdf.cell(0, 7, f"{ticker_val}  ·  {nombre_short}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-    # ── 1. RESUMEN EJECUTIVO ──────────────────────────────────────────────
-    story += section_header("1. RESUMEN EJECUTIVO")
+    pdf.set_x(18)
+    pdf.set_font("Helvetica", "", 9)
+    set_color(C_GRAY)
+    sector_str = fund.get("sector") or fund.get("Categoria") or fund.get("emisor") or "N/D"
+    pdf.cell(0, 6, f"{tipo_val}  ·  {sector_str}  ·  Benchmark: {benchmark}  ·  Período: {periodo}",
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-    nombre_activo = fund.get("nombre", ticker_val)
-    sector_activo = fund.get("sector", fund.get("Categoria", "N/D"))
+    pdf.set_y(46)
+
+    # ── Metadatos ─────────────────────────────────────────────────────────
     precio_actual = fund.get("precio", np.nan)
     precio_str = f"${precio_actual:.2f}" if not pd.isna(precio_actual) else "N/D"
+    meta_items = [
+        ("Fecha emisión",  str(datetime.date.today())),
+        ("Precio actual",  precio_str),
+        ("Tasa RF anual",  f"{rf*100:.2f}%"),
+        ("Activos portaf.", str(len(tickers_ok))),
+        ("Período",        periodo),
+    ]
+    metrics_row(meta_items)
 
-    rec_label = rec.get("recomendacion", "N/D").replace("🟢 ","").replace("🔴 ","").replace("🟡 ","")
+    # ── Recuadro de Recomendación ─────────────────────────────────────────
+    pdf.ln(3)
+    rec_label = (rec.get("recomendacion","N/D")
+                 .replace("🟢 ","").replace("🔴 ","").replace("🟡 ",""))
     rec_desc  = rec.get("descripcion", "")
 
-    story.append(Paragraph(
-        f"<b>{nombre_activo} ({ticker_val})</b> es un activo clasificado como <b>{tipo_val}</b> "
-        f"con precio de mercado de <b>{precio_str}</b>. "
-        f"Tras un análisis integrado de tres dimensiones (técnica, estadística y fundamental), "
-        f"el score ponderado arroja una recomendación de:",
-        style_body
-    ))
-    story.append(Spacer(1, 6))
+    y_rec = pdf.get_y()
+    pdf.set_fill_color(*rec_color)
+    pdf.rect(18, y_rec, PAGE_W, 2, "F")      # línea superior
+    pdf.set_y(y_rec + 3)
 
-    rec_box_data = [[Paragraph(f"⬤  {rec_label}", style_rec)]]
-    rec_table = Table(rec_box_data, colWidths=[doc.width])
-    rec_table.setStyle(TableStyle([
-        ("BACKGROUND",    (0,0), (-1,-1), C_LIGHT),
-        ("BOX",           (0,0), (-1,-1), 2, rec_color),
-        ("TOPPADDING",    (0,0), (-1,-1), 12),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 12),
-        ("ALIGN",         (0,0), (-1,-1), "CENTER"),
-    ]))
-    story.append(rec_table)
-    story.append(Spacer(1, 6))
-    story.append(Paragraph(rec_desc, style_body))
+    fill_rect(18, pdf.get_y(), PAGE_W, 20, C_LIGHT)
+    pdf.set_x(18)
+    pdf.set_font("Helvetica", "B", 20)
+    set_color(rec_color)
+    pdf.cell(0, 12, f"RECOMENDACIÓN:  {rec_label}", align="C",
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_x(18)
+    pdf.set_font("Helvetica", "I", 9)
+    set_color(C_TEXT)
+    pdf.cell(0, 7, safe(rec_desc), align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    fill_rect(18, pdf.get_y(), PAGE_W, 2, rec_color)  # línea inferior
+    pdf.ln(5)
 
     # Score breakdown
     score_items = [
-        ("Score Técnico", f"{rec.get('score_tec',0):+.4f}"),
-        ("Score Estadístico", f"{rec.get('score_est',0):+.4f}"),
-        ("Score Fundamental", f"{rec.get('score_fund',0):+.4f}"),
-        ("SCORE FINAL", f"{rec.get('score',0):+.4f}"),
+        ("Score Técnico",      f"{rec.get('score_tec',0):+.4f}"),
+        ("Score Estadístico",  f"{rec.get('score_est',0):+.4f}"),
+        ("Score Fundamental",  f"{rec.get('score_fund',0):+.4f}"),
+        ("SCORE FINAL",        f"{rec.get('score',0):+.4f}"),
     ]
-    story.append(Spacer(1, 6))
-    story.append(metric_table(score_items))
+    metrics_row(score_items)
 
-    # ── 2. DESCRIPCIÓN DEL ACTIVO ─────────────────────────────────────────
-    story += section_header("2. DESCRIPCIÓN DEL ACTIVO")
+    # ── Advertencia ────────────────────────────────────────────────────────
+    pdf.ln(4)
+    fill_rect(18, pdf.get_y(), PAGE_W, 10, (255, 249, 230))
+    pdf.set_x(18)
+    pdf.set_font("Helvetica", "B", 7.5)
+    set_color((180, 120, 0))
+    pdf.cell(0, 5, "AVISO: Este documento es exclusivamente informativo y no constituye asesoría financiera.", 
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_x(18)
+    pdf.set_font("Helvetica", "I", 7)
+    set_color(C_GRAY)
+    pdf.cell(0, 5, "Consulte siempre a un asesor financiero certificado antes de tomar decisiones de inversión.",
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  PÁGINA 2 – ANÁLISIS DEL ACTIVO
+    # ══════════════════════════════════════════════════════════════════════
+    pdf.add_page()
+
+    # ── Sección 1: Descripción ────────────────────────────────────────────
+    section_title("1. DESCRIPCIÓN DEL ACTIVO")
 
     if "AUM" in fund:
-        # ETF
-        etf_rows = [
-            ["Nombre", nombre_activo],
-            ["Ticker", ticker_val],
-            ["Tipo", "ETF"],
-            ["Emisor / Gestora", str(fund.get("emisor","N/D"))],
-            ["Categoría", str(fund.get("Categoria","N/D"))],
-            ["Región", str(fund.get("Region","N/D"))],
-            ["AUM", f"${fund.get('AUM',np.nan):,.0f}" if not pd.isna(fund.get("AUM",np.nan)) else "N/D"],
-            ["Expense Ratio", f"{fund.get('Expense Ratio',np.nan)*100:.2f}%" if not pd.isna(fund.get("Expense Ratio",np.nan)) else "N/D"],
-            ["Beta", f"{fund.get('Beta',np.nan):.2f}" if not pd.isna(fund.get("Beta",np.nan)) else "N/D"],
-            ["Precio actual", precio_str],
+        rows_desc = [
+            ("Nombre completo", fund.get("nombre", ticker_val)),
+            ("Ticker", ticker_val),
+            ("Tipo", "ETF / Fondo"),
+            ("Gestora / Emisor", fund.get("emisor","N/D")),
+            ("Categoría", fund.get("Categoria","N/D")),
+            ("Región", fund.get("Region","N/D")),
+            ("AUM", f"${fund.get('AUM',np.nan):,.0f}" if not pd.isna(fund.get("AUM",np.nan)) else "N/D"),
+            ("Expense Ratio", f"{fund.get('Expense Ratio',np.nan)*100:.2f}%" if not pd.isna(fund.get("Expense Ratio",np.nan)) else "N/D"),
+            ("Beta", f"{fund.get('Beta',np.nan):.2f}" if not pd.isna(fund.get("Beta",np.nan)) else "N/D"),
+            ("Precio actual (USD)", precio_str),
         ]
-        story.append(data_table(
-            ["Campo", "Valor"],
-            etf_rows,
-            col_widths=[doc.width*0.35, doc.width*0.65],
-        ))
     else:
-        # Acción
-        acc_rows = [
-            ["Nombre", nombre_activo],
-            ["Ticker", ticker_val],
-            ["Tipo", "Acción"],
-            ["Sector", str(fund.get("sector","N/D"))],
-            ["Precio actual", precio_str],
-            ["P/E (Trailing)", f"{fund.get('P/E',np.nan):.1f}x" if not pd.isna(fund.get("P/E",np.nan)) else "N/D"],
-            ["P/B", f"{fund.get('P/B',np.nan):.2f}x" if not pd.isna(fund.get("P/B",np.nan)) else "N/D"],
-            ["EV/EBITDA", f"{fund.get('EV/EBITDA',np.nan):.1f}x" if not pd.isna(fund.get("EV/EBITDA",np.nan)) else "N/D"],
-            ["ROE", f"{fund.get('ROE',np.nan)*100:.1f}%" if not pd.isna(fund.get("ROE",np.nan)) else "N/D"],
-            ["Beta", f"{fund.get('Beta',np.nan):.2f}" if not pd.isna(fund.get("Beta",np.nan)) else "N/D"],
+        def _fmt(v, fmt):
+            return fmt.format(v) if not pd.isna(v) else "N/D"
+        rows_desc = [
+            ("Nombre completo", fund.get("nombre", ticker_val)),
+            ("Ticker", ticker_val),
+            ("Tipo", "Acción (Equity)"),
+            ("Sector", fund.get("sector","N/D")),
+            ("Precio actual (USD)", precio_str),
+            ("P/E Trailing",  _fmt(fund.get("P/E",  np.nan), "{:.1f}x")),
+            ("P/B",           _fmt(fund.get("P/B",  np.nan), "{:.2f}x")),
+            ("EV/EBITDA",     _fmt(fund.get("EV/EBITDA", np.nan), "{:.1f}x")),
+            ("ROE",           _fmt(fund.get("ROE",  np.nan) * 100 if not pd.isna(fund.get("ROE", np.nan)) else np.nan, "{:.1f}%")),
+            ("Beta",          _fmt(fund.get("Beta", np.nan), "{:.2f}")),
         ]
-        story.append(data_table(
-            ["Campo", "Valor"],
-            acc_rows,
-            col_widths=[doc.width*0.35, doc.width*0.65],
-        ))
 
-    # ── 3. ANÁLISIS TÉCNICO ───────────────────────────────────────────────
-    story += section_header("3. ANÁLISIS TÉCNICO")
+    for idx, (lbl, val) in enumerate(rows_desc):
+        kv_row(lbl, val, fill=(idx % 2 == 0))
+
+    # ── Sección 2: Análisis Técnico ───────────────────────────────────────
+    section_title("2. ANÁLISIS TÉCNICO")
+
+    body_text(
+        f"Score técnico: {score_tecnico:+.4f}  ·  RSI actual: {sen.get('rsi_valor',0):.2f}  ·  "
+        f"Tendencia Fibonacci: {sen.get('fib_tendencia','N/D')}"
+    )
 
     señales = sen.get("señales", {})
-    tec_rows = []
+    tec_headers = ["Indicador", "Señal", "Score", "Detalle"]
+    tec_widths  = [36, 28, 20, PAGE_W - 84]
+    tec_rows    = []
     for ind_name, val in señales.items():
-        if val > 0:
-            señal_str = "ALCISTA"
-        elif val < 0:
-            señal_str = "BAJISTA"
-        else:
-            señal_str = "NEUTRAL"
-        detalle = ""
-        if ind_name == "Fibonacci":
-            detalle = sen.get("fib_desc", "")
-        tec_rows.append([ind_name, señal_str, f"{val:+.2f}", detalle])
+        if val > 0:   s = "ALCISTA"
+        elif val < 0: s = "BAJISTA"
+        else:         s = "NEUTRAL"
+        det = sen.get("fib_desc", "") if ind_name == "Fibonacci" else ""
+        det = det[:60] + "…" if len(det) > 60 else det
+        tec_rows.append([ind_name, s, f"{val:+.2f}", det])
+    table(tec_headers, tec_rows, col_widths=tec_widths)
 
-    story.append(data_table(
-        ["Indicador", "Señal", "Puntuación", "Detalle"],
-        tec_rows,
-        col_widths=[doc.width*0.2, doc.width*0.15, doc.width*0.12, doc.width*0.53],
-    ))
-    story.append(Spacer(1, 4))
-    story.append(Paragraph(
-        f"<b>RSI actual:</b> {sen.get('rsi_valor', 0):.2f} &nbsp;&nbsp; "
-        f"<b>Tendencia Fibonacci:</b> {sen.get('fib_tendencia','N/D')} &nbsp;&nbsp; "
-        f"<b>Score técnico:</b> {score_tecnico:+.4f}",
-        style_body
-    ))
+    # ── Sección 3: Análisis Estadístico ──────────────────────────────────
+    section_title("3. ANÁLISIS ESTADÍSTICO")
+    body_text(
+        f"Score estadístico ponderado: {score_estadistico:+.4f}. "
+        "Basado en regresión logarítmica frente al benchmark (alfa/beta de Jensen) "
+        "y análisis de percentiles históricos del precio. Un score positivo indica "
+        "que el activo cotiza por debajo de su precio objetivo implícito por la regresión."
+    )
 
-    # ── 4. ANÁLISIS ESTADÍSTICO ───────────────────────────────────────────
-    story += section_header("4. ANÁLISIS ESTADÍSTICO")
-    story.append(Paragraph(
-        f"<b>Score estadístico:</b> {score_estadistico:+.4f}. "
-        "Basado en regresión log-log frente al benchmark y análisis de percentiles históricos. "
-        "Un score positivo indica que el activo cotiza por debajo de su valor implícito "
-        "según la relación histórica con el benchmark.",
-        style_body
-    ))
-
-    # ── 5. ANÁLISIS FUNDAMENTAL ───────────────────────────────────────────
-    story += section_header("5. ANÁLISIS FUNDAMENTAL")
+    # ── Sección 4: Análisis Fundamental ──────────────────────────────────
+    section_title("4. ANÁLISIS FUNDAMENTAL")
 
     if dcf_result and dcf_result.get("wacc"):
-        story.append(Paragraph(
-            "El modelo DCF (Flujo de Caja Libre Descontado) produce los siguientes resultados:",
-            style_body
-        ))
+        body_text("Modelo DCF (Flujo de Caja Libre Descontado) – resultados:")
         dcf_items = [
-            ("WACC",          f"{dcf_result.get('wacc',0)*100:.2f}%"),
-            ("Ke (CAPM)",     f"{dcf_result.get('ke',0)*100:.2f}%"),
-            ("FCF calculado", f"${dcf_result.get('fcf',0):,.0f}"),
-            ("PO por DCF",    f"${dcf_result.get('po_dcf',0):.2f}"),
-            ("Potencial",     f"{dcf_result.get('potencial',0)*100:+.1f}%"),
+            ("WACC",           f"{dcf_result.get('wacc',0)*100:.2f}%"),
+            ("Ke (CAPM)",      f"{dcf_result.get('ke',0)*100:.2f}%"),
+            ("FCF calculado",  f"${dcf_result.get('fcf',0):,.0f}"),
+            ("PO por DCF",     f"${dcf_result.get('po_dcf',0):.2f}"),
+            ("Potencial",      f"{dcf_result.get('potencial',0)*100:+.1f}%"),
+            ("Score fund.",    f"{dcf_result.get('score',0):+.4f}"),
         ]
-        story.append(Spacer(1, 4))
-        story.append(metric_table(dcf_items))
-        story.append(Spacer(1, 4))
-        story.append(Paragraph(
-            f"VP flujos explícitos (5 años): ${dcf_result.get('vp_flujos',0):,.0f} &nbsp;&nbsp; "
-            f"VP valor terminal: ${dcf_result.get('vp_term',0):,.0f} &nbsp;&nbsp; "
-            f"Tasa crecimiento: {dcf_result.get('g_crec',0)*100:.1f}% &nbsp;&nbsp; "
-            f"Tasa terminal: {dcf_result.get('g_term',0)*100:.1f}%",
-            style_small
-        ))
+        metrics_row(dcf_items)
+        pdf.ln(2)
+        small_text(
+            f"VP flujos explícitos (5 años): ${dcf_result.get('vp_flujos',0):,.0f}  |  "
+            f"VP valor terminal: ${dcf_result.get('vp_term',0):,.0f}  |  "
+            f"Tasa crecimiento FCF: {dcf_result.get('g_crec',0)*100:.1f}%  |  "
+            f"Tasa terminal: {dcf_result.get('g_term',0)*100:.1f}%"
+        )
     else:
         pe = fund.get("P/E", np.nan)
-        story.append(Paragraph(
-            f"No se realizó análisis DCF. "
-            + (f"P/E actual: {pe:.1f}x (score aproximado por múltiplos: {score_fundamental:+.2f})" if not pd.isna(pe) else
-               "Datos fundamentales no disponibles para este tipo de activo."),
-            style_body
-        ))
+        if not pd.isna(pe):
+            body_text(
+                f"No se ejecutó el modelo DCF. Score aproximado por múltiplo P/E = {pe:.1f}x: "
+                f"{score_fundamental:+.2f}. "
+                "Para un análisis completo, ingrese los datos financieros en la sección DCF."
+            )
+        else:
+            body_text(
+                "Análisis fundamental no disponible para este tipo de activo "
+                "(ETF/índice/commodities). Score fundamental fijado en 0."
+            )
 
-    # ── 6. PORTAFOLIO – CONTEXTO ──────────────────────────────────────────
-    story += section_header("6. CONTEXTO DEL PORTAFOLIO")
+    # ══════════════════════════════════════════════════════════════════════
+    #  PÁGINA 3 – PORTAFOLIO
+    # ══════════════════════════════════════════════════════════════════════
+    pdf.add_page()
 
-    # Métricas del portafolio
-    rend_port = rendimientos_port[tickers_ok] if all(t in rendimientos_port for t in tickers_ok) else rendimientos_port
+    section_title("5. COMPOSICIÓN Y OPTIMIZACIÓN DEL PORTAFOLIO")
+
+    body_text(
+        f"El portafolio analizado contiene {len(tickers_ok)} activos: "
+        f"{', '.join(tickers_ok)}. "
+        f"Benchmark de referencia: {benchmark}. Periodo: {periodo}."
+    )
+
+    # Métricas de los 3 portafolios óptimos
+    opt_items = [
+        ("Rend. EA Markowitz",    f"{mk_res['rendimiento']*100:.2f}%"),
+        ("Sharpe Markowitz",      f"{mk_res['sharpe']:.4f}"),
+        ("Rend. EA Max Sharpe",   f"{ms_res['rendimiento']*100:.2f}%"),
+        ("Sharpe Max Sharpe",     f"{ms_res['sharpe']:.4f}"),
+        ("Rend. EA MonteCarlo",   f"{mc_res['rendimiento']*100:.2f}%"),
+        ("Sharpe MonteCarlo",     f"{mc_res['sharpe']:.4f}"),
+    ]
+    metrics_row(opt_items)
+    pdf.ln(4)
+
+    # Tabla de pesos
+    rend_port = rendimientos_port
     rend_anual = (np.exp(rend_port.mean() * 252) - 1) * 100
     vol_anual  = rend_port.std() * np.sqrt(252) * 100
 
-    story.append(Paragraph(
-        f"El portafolio analizado contiene {len(tickers_ok)} activos: "
-        f"<b>{', '.join(tickers_ok)}</b>. "
-        f"El benchmark de referencia es <b>{benchmark}</b>.",
-        style_body
-    ))
-    story.append(Spacer(1, 6))
-
-    # Tabla de pesos óptimos
     port_rows = []
     for i, t in enumerate(tickers_ok):
-        r = rend_anual[t] if t in rend_anual else np.nan
-        v = vol_anual[t]  if t in vol_anual  else np.nan
-        port_rows.append([
-            t,
-            f"{mk_res['pesos'][i]*100:.1f}%" if i < len(mk_res['pesos']) else "N/D",
-            f"{ms_res['pesos'][i]*100:.1f}%" if i < len(ms_res['pesos']) else "N/D",
-            f"{mc_res['pesos'][i]*100:.1f}%" if i < len(mc_res['pesos']) else "N/D",
-            f"{r:.2f}%" if not pd.isna(r) else "N/D",
-            f"{v:.2f}%" if not pd.isna(v) else "N/D",
-        ])
+        r = f"{rend_anual[t]:.2f}%" if t in rend_anual else "N/D"
+        v = f"{vol_anual[t]:.2f}%"  if t in vol_anual  else "N/D"
+        mk_w = f"{mk_res['pesos'][i]*100:.1f}%" if i < len(mk_res['pesos']) else "N/D"
+        ms_w = f"{ms_res['pesos'][i]*100:.1f}%" if i < len(ms_res['pesos']) else "N/D"
+        mc_w = f"{mc_res['pesos'][i]*100:.1f}%" if i < len(mc_res['pesos']) else "N/D"
+        port_rows.append([t, mk_w, ms_w, mc_w, r, v])
 
-    story.append(data_table(
-        ["Ticker", "Markowitz", "Máx Sharpe", "Monte Carlo", "Rend. EA", "Vol. EA"],
+    port_widths = [PAGE_W*0.14] * 6
+    table(
+        ["Ticker", "Markowitz", "Máx Sharpe", "MonteCarlo", "Rend. EA", "Vol. EA"],
         port_rows,
-        col_widths=[doc.width*0.14]*6,
-    ))
-    story.append(Spacer(1, 4))
+        col_widths=port_widths,
+    )
 
-    # Métricas óptimas de portafolio
-    opt_items = [
-        ("Rend. EA (Markowitz)", f"{mk_res['rendimiento']*100:.2f}%"),
-        ("Sharpe (Markowitz)",   f"{mk_res['sharpe']:.4f}"),
-        ("Rend. EA (Max Sharpe)", f"{ms_res['rendimiento']*100:.2f}%"),
-        ("Sharpe (Max Sharpe)",  f"{ms_res['sharpe']:.4f}"),
-        ("Rend. EA (MonteCarlo)", f"{mc_res['rendimiento']*100:.2f}%"),
-        ("Sharpe (MonteCarlo)",  f"{mc_res['sharpe']:.4f}"),
-    ]
-    story.append(metric_table(opt_items))
-
-    # ── 7. RIESGOS Y CONSIDERACIONES ──────────────────────────────────────
-    story += section_header("7. RIESGOS Y CONSIDERACIONES")
-
+    section_title("6. FACTORES DE RIESGO")
     riesgos = [
-        "Riesgo de mercado: variaciones en el índice de referencia pueden afectar significativamente el valor del activo.",
-        "Riesgo de liquidez: para activos de menor capitalización, puede haber spreads amplios o dificultad para ejecutar órdenes grandes.",
-        "Riesgo regulatorio: cambios en política monetaria, fiscal o regulatoria pueden impactar los fundamentales del activo.",
-        "Riesgo modelo: los scores técnico, estadístico y fundamental son herramientas cuantitativas con limitaciones inherentes.",
-        "Riesgo concentración: si el portafolio tiene alta ponderación en un sector, una corrección sectorial puede amplificar pérdidas.",
-        "Datos históricos: el análisis se basa en datos pasados, que no garantizan resultados futuros.",
+        "Riesgo de mercado: variaciones en el benchmark pueden afectar significativamente el valor del activo.",
+        "Riesgo de liquidez: spreads amplios o baja profundidad de mercado pueden dificultar la ejecución.",
+        "Riesgo regulatorio y macroeconómico: cambios en política monetaria o fiscal impactan los fundamentales.",
+        "Riesgo del modelo: los scores técnico, estadístico y fundamental tienen limitaciones cuantitativas inherentes.",
+        "Riesgo de concentración sectorial: alta exposición a un sector amplifica el impacto de correcciones sectoriales.",
+        "Limitación de datos históricos: el análisis backward-looking no garantiza resultados futuros.",
     ]
     for r_text in riesgos:
-        story.append(Paragraph(f"• {r_text}", style_body))
+        pdf.set_x(18)
+        pdf.set_font("Helvetica", "", 8.5)
+        set_color(C_TEXT)
+        pdf.multi_cell(PAGE_W, 5.5, safe(f"  *  {r_text}"), align="J")
+    pdf.ln(3)
 
-    # ── 8. DISCLAIMER ────────────────────────────────────────────────────
-    story.append(Spacer(1, 16))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=C_BORDER))
-    story.append(Spacer(1, 4))
-    story.append(Paragraph(
-        "AVISO LEGAL: Este documento ha sido generado automáticamente por la herramienta "
-        "Analizador de Portafolios desarrollada por Diego CR con fines exclusivamente académicos "
-        "e informativos. NO constituye asesoría de inversión, recomendación financiera ni oferta "
-        "de compra o venta de valores. Las proyecciones y scores presentados son resultado de "
-        "modelos cuantitativos y pueden diferir de la realidad. Consulte siempre a un asesor "
-        "financiero certificado antes de tomar decisiones de inversión. Datos: Yahoo Finance.",
-        style_disclaimer
-    ))
+    section_title("7. DISCLAIMER LEGAL")
+    body_text(
+        "Este documento ha sido generado automáticamente por la herramienta Analizador de "
+        "Portafolios desarrollada por Diego CR con fines exclusivamente académicos e "
+        "informativos. NO constituye asesoría de inversión, recomendación financiera ni "
+        "oferta de compra o venta de valores. Las proyecciones y scores son resultado de "
+        "modelos cuantitativos y pueden diferir materialmente de la realidad. "
+        "Consulte siempre a un asesor financiero certificado antes de tomar decisiones "
+        "de inversión. Datos obtenidos de Yahoo Finance vía la librería yfinance.",
+        italic=True,
+    )
 
-    # ══════════════════════════════════════════════════════════════════════
-    doc.build(story)
-    buffer.seek(0)
-    return buffer.getvalue()
+    # ── Output ─────────────────────────────────────────────────────────────
+    return bytes(pdf.output())
 
 
-#  PROCESAMIENTO PRINCIPAL
 # ═════════════════════════════════════════════════════════════════════════════
 tickers_raw = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 benchmark   = benchmark_input.strip().upper()
